@@ -93,9 +93,15 @@ fn main() -> Result<()> {
                             KeyCode::Char('s') => {
                                 app.stop();
                             }
+                            // Toggle view mode between Lyrics and Song Details!
+                            KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Char('d') | KeyCode::Char('D') => {
+                                app.toggle_view_mode();
+                            }
+                            // Toggle collapsible playlists
                             KeyCode::Char('P') | KeyCode::Tab => {
                                 app.toggle_playlists();
                             }
+                            // Cycle color themes
                             KeyCode::Char('t') | KeyCode::Char('m') => {
                                 app.next_theme();
                             }
@@ -130,6 +136,6 @@ fn main() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
     terminal.show_cursor()?;
 
-    println!("👋 Thanks for using Disco Terminal! Exited cleanly.");
+    println!("👋 Thanks for using wasimmos player! Exited cleanly.");
     Ok(())
 }

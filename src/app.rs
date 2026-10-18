@@ -3,8 +3,15 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::{AudioEngine, VisualizerAnalyzer};
+use crate::ui::details::TrackDetails;
 use crate::ui::lyrics::LyricLine;
 use crate::ui::ThemeMode;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CardViewMode {
+    Lyrics,
+    SongDetails,
+}
 
 #[allow(dead_code)]
 pub struct App {
@@ -18,6 +25,7 @@ pub struct App {
 
     pub album_cover: Option<DynamicImage>,
     pub theme: ThemeMode,
+    pub view_mode: CardViewMode,
 
     // Collapsible Playlists & Search
     pub show_playlists: bool,
@@ -27,6 +35,7 @@ pub struct App {
     pub selected_playlist: usize,
 
     pub lyrics: Vec<LyricLine>,
+    pub track_details: TrackDetails,
     pub visualizer: VisualizerAnalyzer,
     pub audio_engine: AudioEngine,
 
@@ -57,7 +66,7 @@ impl App {
             "♥ Liked Songs (420)".to_string(),
         ];
 
-        // Authentic synced lyrics from the reference image
+        // Authentic synced lyrics
         let lyrics = vec![
             LyricLine { time_ms: 0, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
             LyricLine { time_ms: 12_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
@@ -72,6 +81,23 @@ impl App {
             LyricLine { time_ms: 96_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
         ];
 
+        let track_details = TrackDetails {
+            album: "Anwar (Original Soundtrack)".to_string(),
+            artist: "Roop Kumar Rathod, Mithoon".to_string(),
+            release_year: "2007".to_string(),
+            genre: "Sufi Fusion / Acoustic".to_string(),
+            format: "FLAC 24-bit / 96 kHz".to_string(),
+            bitrate: "Hi-Res Lossless ✦ 2840 kbps".to_string(),
+            tempo: "86 BPM".to_string(),
+            key_signature: "D Minor".to_string(),
+            up_next: vec![
+                ("Javeda Zindagi (Tose Naina)".to_string(), "Kshitij Tarey, Anwar".to_string(), "05:14".to_string()),
+                ("Tere Bina".to_string(), "A.R. Rahman, Chinmayi".to_string(), "05:08".to_string()),
+                ("Tu Jaane Na".to_string(), "Atif Aslam, Ajab Prem".to_string(), "05:37".to_string()),
+                ("Kun Faya Kun".to_string(), "A.R. Rahman, Rockstar".to_string(), "07:53".to_string()),
+            ],
+        };
+
         Self {
             current_track: "Maula Mere Maula".to_string(),
             current_artist: "Roop Kumar Rathod • Anwar".to_string(),
@@ -79,10 +105,11 @@ impl App {
             duration: Duration::from_secs(364), // 6:04
             is_playing: true,
             volume: 0.85,
-            playback_time_ms: 42_000, // 0:42 matching screenshot
+            playback_time_ms: 42_000,
 
             album_cover,
             theme: ThemeMode::DiscoIce,
+            view_mode: CardViewMode::Lyrics,
 
             show_playlists: false,
             is_searching: false,
@@ -91,6 +118,7 @@ impl App {
             selected_playlist: 0,
 
             lyrics,
+            track_details,
             visualizer,
             audio_engine,
 
@@ -110,7 +138,6 @@ impl App {
             .unwrap_or_default()
             .as_secs();
 
-        // Local time offset approximation (India Standard Time UTC+5:30)
         let local_secs = total_secs + (5 * 3600 + 30 * 60);
         let hours = (local_secs / 3600) % 24;
         let mins = (local_secs / 60) % 60;
@@ -132,7 +159,6 @@ impl App {
                 self.playback_time_ms = 0;
             }
 
-            // Real-time audio spectrum animation
             self.visualizer.update_procedural(self.anim_time);
         }
     }
@@ -144,6 +170,13 @@ impl App {
     pub fn stop(&mut self) {
         self.is_playing = false;
         self.playback_time_ms = 0;
+    }
+
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            CardViewMode::Lyrics => CardViewMode::SongDetails,
+            CardViewMode::SongDetails => CardViewMode::Lyrics,
+        };
     }
 
     pub fn next_theme(&mut self) {

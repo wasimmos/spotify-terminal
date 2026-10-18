@@ -1,5 +1,6 @@
 pub mod art;
 pub mod controls;
+pub mod details;
 pub mod layout;
 pub mod lyrics;
 pub mod playlist_modal;

@@ -6,10 +6,11 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
+use crate::app::{App, CardViewMode};
 use crate::ui::{
     art::AlbumArtWidget,
     controls::{AlbumSubControlsWidget, ProgressBarWidget},
+    details::SongDetailsWidget,
     lyrics::LyricsWidget,
     playlist_modal::PlaylistModalWidget,
     visualizer::VisualizerWidget,
@@ -20,37 +21,37 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     let theme = app.theme;
 
     // Outer layout:
-    // 1. Top Title Bar (1 row)
-    // 2. Now Playing Card (flexible, ~48-52%)
-    // 3. Middle Progress & Hotkeys Bar (3 rows)
-    // 4. Bottom CAVA Visualizer (~40-42% of screen, 90% of reference image)
+    // 1. Top Title Bar: "✦ wasimmos" (1 row)
+    // 2. Now Playing Card (flexible)
+    // 3. Middle Progress Bar ONLY (1 row - removed hotkey line!)
+    // 4. Bottom Discrete CAVA Visualizer (~40% of screen height)
     let vis_height = ((size.height as f32) * 0.40).round().max(6.0) as u16;
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                  // Top title bar
+            Constraint::Length(1),                  // Top title bar: "wasimmos"
             Constraint::Min(12),                    // Now Playing card
-            Constraint::Length(3),                  // Progress bar & key hint bar
+            Constraint::Length(1),                  // Clean progress bar only!
             Constraint::Length(vis_height),         // Discrete CAVA Visualizer
         ])
         .split(size);
 
     let title_bar_area = main_chunks[0];
     let card_area = main_chunks[1];
-    let controls_area = main_chunks[2];
+    let progress_area = main_chunks[2];
     let visualizer_area = main_chunks[3];
 
     // ==========================================
-    // 1. TOP TITLE BAR
+    // 1. TOP TITLE BAR: "wasimmos"
     // ==========================================
     let clock_str = app.current_time_str();
-    let title_left = Span::styled(" 🌐 Disco Terminal ", Style::default().fg(Color::Rgb(160, 160, 180)));
-    let clock_right = Span::styled(format!(" {} ", clock_str), Style::default().fg(Color::Rgb(160, 160, 180)));
+    let title_left = Span::styled(" ✦ wasimmos ", Style::default().fg(theme.title_color()).add_modifier(Modifier::BOLD));
+    let clock_right = Span::styled(format!(" {} ", clock_str), Style::default().fg(Color::Rgb(150, 150, 170)));
 
     let top_bar_line = Line::from(vec![
         title_left,
-        Span::raw(" ".repeat(title_bar_area.width.saturating_sub(24 + clock_str.len() as u16) as usize)),
+        Span::raw(" ".repeat(title_bar_area.width.saturating_sub(16 + clock_str.len() as u16) as usize)),
         clock_right,
     ]);
     f.render_widget(Paragraph::new(top_bar_line), title_bar_area);
@@ -67,10 +68,8 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     f.render_widget(card_block, card_area);
 
     if inner_card.width > 20 && inner_card.height > 6 {
-        // Left Column (Album Art + Sub Controls) vs Right Column (Header + Lyrics)
-        // Album art is square: in terminal cells with halfblocks, width ~ (height - 2) * 1.8
-        let album_col_width = (((inner_card.height.saturating_sub(2)) as f32 * 1.8).round() as u16)
-            .clamp(20, (inner_card.width * 42 / 100).max(22));
+        // Compact Album Art Column: ~24 cols wide, keeping the icon smaller and elegant
+        let album_col_width: u16 = if inner_card.width > 90 { 24 } else { 20 };
 
         let card_horiz = Layout::default()
             .direction(Direction::Horizontal)
@@ -81,124 +80,130 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
             .split(inner_card);
 
         let left_album_pane = card_horiz[0];
-        let right_lyrics_pane = card_horiz[1];
+        let right_content_pane = card_horiz[1];
 
-        // Left Pane: Album Art (top) + Sub Controls (bottom 2 rows)
+        // Left Pane: Smaller Album Art (centered, height ~8) + Bigger Controls below it
+        let art_height = (album_col_width / 2).clamp(7, 9).min(left_album_pane.height.saturating_sub(2));
+
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(4),
-                Constraint::Length(2),
+                Constraint::Length(art_height), // Smaller album icon
+                Constraint::Length(2),          // Prominent play/stop controls directly below
+                Constraint::Min(0),             // Spacer
             ])
             .split(left_album_pane);
 
         let art_area = left_chunks[0];
         let sub_controls_area = left_chunks[1];
 
-        // Render Album Art
+        // Render Smaller Album Art
         f.render_widget(
             AlbumArtWidget::new(theme, app.album_cover.as_ref(), app.anim_time),
             art_area,
         );
 
-        // Render Sub-controls directly below Album Art (⏮  ▶/⏸  ⏹  ⏭)
+        // Render Prominent Transport Controls directly below Album Art
         f.render_widget(
             AlbumSubControlsWidget {
                 is_playing: app.is_playing,
-                volume: app.volume,
                 theme,
             },
             sub_controls_area,
         );
 
-        // Right Pane: Header (Song title + badge) + Synced Lyrics
+        // Right Pane: Header (Song title + Mode Toggle Tabs + Playing Badge) + Body (Lyrics / Details)
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header row
-                Constraint::Min(4),    // Lyrics
+                Constraint::Length(3), // Header row with mode tabs
+                Constraint::Min(4),    // Content area (Lyrics OR Song Details)
             ])
-            .split(right_lyrics_pane);
+            .split(right_content_pane);
 
-        let lyrics_header_area = right_chunks[0];
-        let lyrics_body_area = right_chunks[1];
+        let header_area = right_chunks[0];
+        let body_area = right_chunks[1];
 
-        // Header: `🎤 Song Title` + `Artist` (left), and `[ 🎵 playing ]` badge (right)
+        // Header: `🎤 Song Title` + Mode Tabs `[ 📝 Lyrics (L) ] [ ℹ Details (D) ]` + `[ 🎵 playing ]`
         let play_badge = if app.is_playing { "🎵 playing" } else { "⏸ paused" };
-        let badge_len = play_badge.len() as u16 + 6;
 
-        let title_spans = vec![
+        let (lyrics_tab_style, details_tab_style) = match app.view_mode {
+            CardViewMode::Lyrics => (
+                Style::default()
+                    .fg(Color::Rgb(20, 20, 30))
+                    .bg(theme.title_color())
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(35, 30, 48)),
+            ),
+            CardViewMode::SongDetails => (
+                Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(35, 30, 48)),
+                Style::default()
+                    .fg(Color::Rgb(20, 20, 30))
+                    .bg(theme.title_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        };
+
+        let title_line = Line::from(vec![
             Span::styled("🎤  ", Style::default().fg(theme.title_color())),
             Span::styled(&app.current_track, Style::default().fg(theme.title_color()).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  •  {}", app.current_artist), Style::default().fg(Color::Rgb(160, 160, 175))),
-        ];
+            Span::styled(format!("  •  {}", app.current_artist), Style::default().fg(Color::Rgb(160, 160, 180))),
+        ]);
 
-        let header_line = Line::from(title_spans);
-        let badge_line = Line::from(vec![
-            Span::styled(format!("  {}  ", play_badge), Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 55))),
+        let right_controls_line = Line::from(vec![
+            Span::styled(" 📝 Lyrics (L) ", lyrics_tab_style),
+            Span::raw(" "),
+            Span::styled(" ℹ Details (D) ", details_tab_style),
+            Span::raw("   "),
+            Span::styled(format!(" {} ", play_badge), Style::default().fg(Color::White).bg(Color::Rgb(40, 38, 55))),
         ]);
 
         let header_horiz = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(10),
-                Constraint::Length(badge_len),
+                Constraint::Length(40),
             ])
-            .split(lyrics_header_area);
+            .split(header_area);
 
-        f.render_widget(Paragraph::new(header_line), header_horiz[0]);
-        f.render_widget(Paragraph::new(badge_line), header_horiz[1]);
+        f.render_widget(Paragraph::new(title_line), header_horiz[0]);
+        f.render_widget(Paragraph::new(right_controls_line), header_horiz[1]);
 
-        // Lyrics Body
-        f.render_widget(
-            LyricsWidget::new(&app.lyrics, app.playback_time_ms, theme),
-            lyrics_body_area,
-        );
+        // Body: Switch between Lyrics mode and Song Details mode
+        match app.view_mode {
+            CardViewMode::Lyrics => {
+                f.render_widget(
+                    LyricsWidget::new(&app.lyrics, app.playback_time_ms, theme),
+                    body_area,
+                );
+            }
+            CardViewMode::SongDetails => {
+                f.render_widget(
+                    SongDetailsWidget {
+                        details: &app.track_details,
+                        theme,
+                    },
+                    body_area,
+                );
+            }
+        }
     }
 
     // ==========================================
-    // 3. MIDDLE PROGRESS & HOTKEYS BAR
+    // 3. MIDDLE PROGRESS BAR ONLY (Clean & Minimalist!)
     // ==========================================
-    let controls_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(2)])
-        .split(controls_area);
-
-    // Progress Bar
     f.render_widget(
         ProgressBarWidget {
             elapsed: app.elapsed(),
             total: app.duration,
             theme,
         },
-        controls_chunks[0],
+        progress_area,
     );
-
-    // Hotkey Bar matching screenshot style
-    let hotkeys_line = Line::from(vec![
-        Span::styled("space ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled("Play/Pause   ", Style::default().fg(Color::Rgb(180, 180, 195))),
-        Span::styled("n ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled("Next   ", Style::default().fg(Color::Rgb(180, 180, 195))),
-        Span::styled("p ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled("Prev   ", Style::default().fg(Color::Rgb(180, 180, 195))),
-        Span::styled("s ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled("Stop   ", Style::default().fg(Color::Rgb(180, 180, 195))),
-        Span::styled("P ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled("Playlists   ", Style::default().fg(Color::Rgb(180, 180, 195))),
-        Span::styled("t ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("Theme [{}]   ", theme.name()), Style::default().fg(Color::Rgb(180, 180, 195))),
-        Span::styled("+/- ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("Vol {}%   ", (app.volume * 100.0) as u32), Style::default().fg(Color::Rgb(180, 180, 195))),
-        Span::styled("q ", Style::default().fg(theme.key_accent()).add_modifier(Modifier::BOLD)),
-        Span::styled("Quit", Style::default().fg(Color::Rgb(180, 180, 195))),
-    ]);
-    f.render_widget(Paragraph::new(hotkeys_line), controls_chunks[1]);
 
     // ==========================================
     // 4. BOTTOM CAVA VISUALIZER (90% size of reference)
     // ==========================================
-    // Adjust number of bands dynamically
     let bar_width = if visualizer_area.width > 120 { 3 } else { 2 };
     let gap_width = 1;
     let num_bars = ((visualizer_area.width + gap_width) / (bar_width + gap_width)) as usize;

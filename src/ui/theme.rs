@@ -11,6 +11,7 @@ pub enum ThemeMode {
     Monochrome,     // Crisp minimal white & slate
 }
 
+#[allow(dead_code)]
 impl ThemeMode {
     pub fn next(&self) -> Self {
         match self {

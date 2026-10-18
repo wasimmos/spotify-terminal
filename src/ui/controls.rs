@@ -8,11 +8,9 @@ use ratatui::{
 use crate::ui::theme::ThemeMode;
 use std::time::Duration;
 
-/// Transport controls placed directly beneath the album art
+/// Prominent playback controls placed directly beneath the album art
 pub struct AlbumSubControlsWidget {
     pub is_playing: bool,
-    #[allow(dead_code)]
-    pub volume: f32,
     pub theme: ThemeMode,
 }
 
@@ -22,25 +20,56 @@ impl Widget for AlbumSubControlsWidget {
             return;
         }
 
-        let play_icon = if self.is_playing { "⏸" } else { "▶" };
-        let btns = format!("⏮   {}   ⏹   ⏭", play_icon);
-        let btns_len = btns.chars().count() as u16;
+        let play_btn = if self.is_playing { " ⏸ " } else { " ▶ " };
 
-        let x = area.x + (area.width.saturating_sub(btns_len)) / 2;
+        // Styled button segments
+        let prev_btn = " ⏮ ";
+        let stop_btn = " ⏹ ";
+        let next_btn = " ⏭ ";
+
+        let full_text = format!("{} {} {} {}", prev_btn, play_btn, stop_btn, next_btn);
+        let len = full_text.chars().count() as u16;
+        let x = area.x + (area.width.saturating_sub(len)) / 2;
         let y = area.y;
 
-        buf.set_string(
-            x,
-            y,
-            &btns,
+        // Render with high-contrast accent styling
+        let active_play_style = if self.is_playing {
+            Style::default()
+                .fg(Color::Rgb(20, 20, 30))
+                .bg(self.theme.title_color())
+                .add_modifier(Modifier::BOLD)
+        } else {
             Style::default()
                 .fg(self.theme.title_color())
-                .add_modifier(Modifier::BOLD),
-        );
+                .bg(Color::Rgb(40, 35, 55))
+                .add_modifier(Modifier::BOLD)
+        };
+
+        let normal_style = Style::default()
+            .fg(Color::Rgb(220, 220, 235))
+            .bg(Color::Rgb(30, 28, 42))
+            .add_modifier(Modifier::BOLD);
+
+        let mut cur_x = x;
+
+        // ⏮ Prev
+        buf.set_string(cur_x, y, prev_btn, normal_style);
+        cur_x += prev_btn.chars().count() as u16 + 1;
+
+        // ▶ / ⏸ Play
+        buf.set_string(cur_x, y, play_btn, active_play_style);
+        cur_x += play_btn.chars().count() as u16 + 1;
+
+        // ⏹ Stop
+        buf.set_string(cur_x, y, stop_btn, normal_style);
+        cur_x += stop_btn.chars().count() as u16 + 1;
+
+        // ⏭ Next
+        buf.set_string(cur_x, y, next_btn, normal_style);
     }
 }
 
-/// Middle progress bar and hotkey bar
+/// Middle progress bar
 pub struct ProgressBarWidget {
     pub elapsed: Duration,
     pub total: Duration,
@@ -83,7 +112,7 @@ impl Widget for ProgressBarWidget {
             }
 
             let y = area.y;
-            buf.set_string(area.x, y, &elapsed_str, Style::default().fg(Color::Rgb(160, 160, 175)));
+            buf.set_string(area.x, y, &elapsed_str, Style::default().fg(Color::Rgb(170, 170, 185)));
             buf.set_string(
                 area.x + elapsed_str.len() as u16 + 2,
                 y,
@@ -94,7 +123,7 @@ impl Widget for ProgressBarWidget {
                 area.right().saturating_sub(total_str.len() as u16),
                 y,
                 &total_str,
-                Style::default().fg(Color::Rgb(160, 160, 175)),
+                Style::default().fg(Color::Rgb(170, 170, 185)),
             );
         }
     }
