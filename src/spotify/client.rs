@@ -81,7 +81,7 @@ impl SpotifyManager {
 
                 let oauth = OAuth {
                     redirect_uri: std::env::var("RSPOTIFY_REDIRECT_URI")
-                        .unwrap_or_else(|_| "http://localhost:8888/callback".to_string()),
+                        .unwrap_or_else(|_| "http://127.0.0.1:8888/callback".to_string()),
                     scopes: scopes!(
                         "user-read-playback-state",
                         "user-modify-playback-state",
