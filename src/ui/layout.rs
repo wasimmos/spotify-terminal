@@ -47,11 +47,16 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     // ==========================================
     let clock_str = app.current_time_str();
     let title_left = Span::styled(" ✦ wasimmos ", Style::default().fg(theme.title_color()).add_modifier(Modifier::BOLD));
+    let status_span = Span::styled(format!(" [{}] ", app.spotify_status), Style::default().fg(Color::Rgb(170, 220, 180)));
     let clock_right = Span::styled(format!(" {} ", clock_str), Style::default().fg(Color::Rgb(150, 150, 170)));
+
+    let used_len = (14 + app.spotify_status.len() + clock_str.len() + 4) as u16;
+    let spacer_len = title_bar_area.width.saturating_sub(used_len) as usize;
 
     let top_bar_line = Line::from(vec![
         title_left,
-        Span::raw(" ".repeat(title_bar_area.width.saturating_sub(16 + clock_str.len() as u16) as usize)),
+        status_span,
+        Span::raw(" ".repeat(spacer_len)),
         clock_right,
     ]);
     f.render_widget(Paragraph::new(top_bar_line), title_bar_area);

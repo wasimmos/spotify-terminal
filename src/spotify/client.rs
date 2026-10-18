@@ -3,8 +3,9 @@ use image::DynamicImage;
 use rspotify::{
     model::{AdditionalType, PlayableItem},
     prelude::*,
-    scopes, AuthCodePkceSpotify, Credentials, OAuth,
+    scopes, AuthCodePkceSpotify, Config, Credentials, OAuth,
 };
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,7 +18,6 @@ pub struct SpotifyPlaybackState {
     pub track_name: String,
     pub artist_name: String,
     pub album_name: String,
-    #[allow(dead_code)]
     pub album_art_url: Option<String>,
     pub progress_ms: u64,
     pub duration_ms: u64,
@@ -51,7 +51,6 @@ impl SpotifyManager {
     pub fn spawn(event_sender: Sender<SpotifyEvent>) -> Self {
         let (cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<SpotifyCommand>(32);
 
-        // Spawn background tokio runtime worker
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -60,7 +59,7 @@ impl SpotifyManager {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = event_sender.send(SpotifyEvent::Disconnected(format!(
-                        "Failed to start Tokio runtime: {}",
+                        "Runtime error: {}",
                         e
                     )));
                     return;
@@ -92,23 +91,31 @@ impl SpotifyManager {
                         "user-read-currently-playing",
                         "playlist-read-private",
                         "playlist-read-collaborative",
-                        "user-library-read"
+                        "user-library-read",
+                        "user-read-recently-played"
                     ),
                     ..Default::default()
                 };
 
-                let mut spotify = AuthCodePkceSpotify::new(creds, oauth);
+                // Enable persistent token caching
+                let cache_file = PathBuf::from("/home/insane/spotify-terminal/.spotify_token_cache.json");
+                let config = Config {
+                    token_cached: true,
+                    cache_path: cache_file,
+                    ..Default::default()
+                };
 
-                // Attempt to read token from cache
+                let mut spotify = AuthCodePkceSpotify::with_config(creds, oauth, config);
+
+                // Check for existing cached token
                 let mut is_auth = false;
-                if let Ok(Some(tok)) = spotify.read_token_cache(false).await {
+                if let Ok(Some(tok)) = spotify.read_token_cache(true).await {
                     *spotify.get_token().lock().await.unwrap() = Some(tok);
                     is_auth = true;
-                    let _ = event_sender.send(SpotifyEvent::Connected("Spotify Connected (Cached)".to_string()));
+                    let _ = event_sender.send(SpotifyEvent::Connected("🟢 Connected".to_string()));
                 }
 
                 if !is_auth {
-                    // Try to start local loopback listener on port 8888 for 1-click automatic auth
                     let listener = TcpListener::bind("127.0.0.1:8888").await.ok();
 
                     let auth_url = match spotify.get_authorize_url(None) {
@@ -119,27 +126,37 @@ impl SpotifyManager {
                         }
                     };
 
-                    let _ = event_sender.send(SpotifyEvent::Disconnected(format!(
-                        "Login at: {}",
-                        auth_url
-                    )));
+                    let _ = event_sender.send(SpotifyEvent::Disconnected("🟡 Authorizing in browser...".to_string()));
 
                     // Auto-open browser
                     let _ = webbrowser::open(&auth_url);
 
-                    // Wait for the browser redirect callback on 127.0.0.1:8888
                     if let Some(listener) = listener {
-                        if let Some(code) = wait_for_auth_code(listener).await {
-                            if let Ok(()) = spotify.request_token(&code).await {
-                                is_auth = true;
-                                let _ = event_sender.send(SpotifyEvent::Connected("Spotify Connected!".to_string()));
+                        if let Some(code) = wait_for_auth_code(listener, &spotify).await {
+                            match spotify.request_token(&code).await {
+                                Ok(()) => {
+                                    is_auth = true;
+                                    let _ = spotify.write_token_cache().await;
+                                    let _ = event_sender.send(SpotifyEvent::Connected("🟢 Connected".to_string()));
+                                }
+                                Err(e) => {
+                                    let _ = event_sender.send(SpotifyEvent::Disconnected(format!("Auth Error: {}", e)));
+                                }
                             }
                         }
                     }
                 }
 
+                if is_auth {
+                    // Fetch playlists immediately on connect
+                    fetch_and_send_playlists(&spotify, &event_sender).await;
+
+                    // If idle, fetch recently played track
+                    fetch_recent_or_idle_track(&spotify, &event_sender).await;
+                }
+
                 let mut last_art_url: Option<String> = None;
-                let mut poll_interval = tokio::time::interval(Duration::from_millis(1500));
+                let mut poll_interval = tokio::time::interval(Duration::from_millis(1200));
 
                 loop {
                     tokio::select! {
@@ -149,40 +166,47 @@ impl SpotifyManager {
                             }
 
                             // Fetch current playback state from Spotify
-                            if let Ok(Some(playback)) = spotify.current_playback(None, None::<&[AdditionalType]>).await {
-                                if let Some(item) = playback.item {
-                                    if let PlayableItem::Track(full_track) = item {
-                                        let artists = full_track.artists.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ");
-                                        let art_url = full_track.album.images.first().map(|img| img.url.clone());
+                            match spotify.current_playback(None, None::<&[AdditionalType]>).await {
+                                Ok(Some(playback)) => {
+                                    if let Some(item) = playback.item {
+                                        if let PlayableItem::Track(full_track) = item {
+                                            let artists = full_track.artists.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ");
+                                            let art_url = full_track.album.images.first().map(|img| img.url.clone());
 
-                                        let progress_ms = playback.progress.map(|d| d.num_milliseconds().max(0) as u64).unwrap_or(0);
-                                        let duration_ms = full_track.duration.num_milliseconds().max(0) as u64;
+                                            let progress_ms = playback.progress.map(|d| d.num_milliseconds().max(0) as u64).unwrap_or(0);
+                                            let duration_ms = full_track.duration.num_milliseconds().max(0) as u64;
 
-                                        // If album art changed, download in background
-                                        if art_url != last_art_url {
-                                            last_art_url = art_url.clone();
-                                            if let Some(ref url) = art_url {
-                                                if let Ok(resp) = reqwest::get(url).await {
-                                                    if let Ok(bytes) = resp.bytes().await {
-                                                        if let Ok(img) = image::load_from_memory(&bytes) {
-                                                            let _ = event_sender.send(SpotifyEvent::AlbumArtLoaded(img));
+                                            // If album art changed, download in background
+                                            if art_url != last_art_url {
+                                                last_art_url = art_url.clone();
+                                                if let Some(ref url) = art_url {
+                                                    if let Ok(resp) = reqwest::get(url).await {
+                                                        if let Ok(bytes) = resp.bytes().await {
+                                                            if let Ok(img) = image::load_from_memory(&bytes) {
+                                                                let _ = event_sender.send(SpotifyEvent::AlbumArtLoaded(img));
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
-                                        }
 
-                                        let _ = event_sender.send(SpotifyEvent::PlaybackUpdate(SpotifyPlaybackState {
-                                            track_name: full_track.name,
-                                            artist_name: artists,
-                                            album_name: full_track.album.name,
-                                            album_art_url: art_url,
-                                            progress_ms,
-                                            duration_ms,
-                                            is_playing: playback.is_playing,
-                                        }));
+                                            let _ = event_sender.send(SpotifyEvent::PlaybackUpdate(SpotifyPlaybackState {
+                                                track_name: full_track.name,
+                                                artist_name: artists,
+                                                album_name: full_track.album.name,
+                                                album_art_url: art_url,
+                                                progress_ms,
+                                                duration_ms,
+                                                is_playing: playback.is_playing,
+                                            }));
+                                        }
                                     }
                                 }
+                                Ok(None) => {
+                                    // Playback is idle (no active device playing)
+                                    // Status will show idle, awaiting user action
+                                }
+                                Err(_) => {}
                             }
                         }
 
@@ -198,6 +222,15 @@ impl SpotifyManager {
                                         } else {
                                             let _ = spotify.resume_playback(None, None).await;
                                         }
+                                    } else {
+                                        // Try starting playback on available device
+                                        if let Ok(devices) = spotify.device().await {
+                                            if let Some(dev) = devices.first() {
+                                                if let Some(ref dev_id) = dev.id {
+                                                    let _ = spotify.transfer_playback(dev_id, Some(true)).await;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 SpotifyCommand::NextTrack => {
@@ -207,17 +240,7 @@ impl SpotifyManager {
                                     let _ = spotify.previous_track(None).await;
                                 }
                                 SpotifyCommand::FetchPlaylists => {
-                                    let mut stream = spotify.current_user_playlists();
-                                    let mut names = Vec::new();
-                                    while let Some(Ok(playlist)) = stream.next().await {
-                                        names.push(playlist.name);
-                                        if names.len() >= 50 {
-                                            break;
-                                        }
-                                    }
-                                    if !names.is_empty() {
-                                        let _ = event_sender.send(SpotifyEvent::PlaylistsLoaded(names));
-                                    }
+                                    fetch_and_send_playlists(&spotify, &event_sender).await;
                                 }
                             }
                         }
@@ -246,8 +269,53 @@ impl SpotifyManager {
     }
 }
 
-/// Listens on loopback port 8888 for the Spotify OAuth redirect and extracts the auth code
-async fn wait_for_auth_code(listener: TcpListener) -> Option<String> {
+async fn fetch_and_send_playlists(spotify: &AuthCodePkceSpotify, event_sender: &Sender<SpotifyEvent>) {
+    let mut stream = spotify.current_user_playlists();
+    let mut names = Vec::new();
+    while let Some(Ok(playlist)) = stream.next().await {
+        names.push(playlist.name);
+        if names.len() >= 50 {
+            break;
+        }
+    }
+    if !names.is_empty() {
+        let _ = event_sender.send(SpotifyEvent::PlaylistsLoaded(names));
+    }
+}
+
+async fn fetch_recent_or_idle_track(spotify: &AuthCodePkceSpotify, event_sender: &Sender<SpotifyEvent>) {
+    // If not currently playing, show last played track
+    if let Ok(recent) = spotify.current_user_recently_played(Some(1), None).await {
+        if let Some(first) = recent.items.first() {
+            let track = &first.track;
+            let artists = track.artists.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ");
+            let art_url = track.album.images.first().map(|img| img.url.clone());
+            let duration_ms = track.duration.num_milliseconds().max(0) as u64;
+
+            if let Some(ref url) = art_url {
+                if let Ok(resp) = reqwest::get(url).await {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if let Ok(img) = image::load_from_memory(&bytes) {
+                            let _ = event_sender.send(SpotifyEvent::AlbumArtLoaded(img));
+                        }
+                    }
+                }
+            }
+
+            let _ = event_sender.send(SpotifyEvent::PlaybackUpdate(SpotifyPlaybackState {
+                track_name: track.name.clone(),
+                artist_name: artists,
+                album_name: track.album.name.clone(),
+                album_art_url: art_url,
+                progress_ms: 0,
+                duration_ms,
+                is_playing: false,
+            }));
+        }
+    }
+}
+
+async fn wait_for_auth_code(listener: TcpListener, _spotify: &AuthCodePkceSpotify) -> Option<String> {
     if let Ok((mut socket, _)) = listener.accept().await {
         let mut buf = [0u8; 2048];
         if let Ok(n) = socket.read(&mut buf).await {
@@ -259,7 +327,7 @@ async fn wait_for_auth_code(listener: TcpListener) -> Option<String> {
 
                 let html = "<!DOCTYPE html><html><body style='font-family:system-ui,sans-serif;text-align:center;padding:60px;background:#100e18;color:#eee'>\
                     <h1 style='color:#32ff78;font-size:2rem'>✦ Spotify Connected Successfully!</h1>\
-                    <p style='color:#aaa;font-size:1.1rem'>You can now close this browser tab and return to <b>wasimmos</b> player.</p>\
+                    <p style='color:#aaa;font-size:1.1rem'>You can now close this tab and return to <b>wasimmos</b> player.</p>\
                     </body></html>";
 
                 let response = format!(
