@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod spotify;
 mod ui;
 
 use std::io::{stdout, Result};
@@ -106,12 +107,10 @@ fn main() -> Result<()> {
                                 app.next_theme();
                             }
                             KeyCode::Char('n') => {
-                                // Next track
-                                app.playback_time_ms = 0;
+                                app.next_track();
                             }
                             KeyCode::Char('p') => {
-                                // Previous track
-                                app.playback_time_ms = 0;
+                                app.previous_track();
                             }
                             KeyCode::Char('+') | KeyCode::Char('=') => {
                                 app.volume_up();

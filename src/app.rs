@@ -1,8 +1,10 @@
 use image::DynamicImage;
 use std::path::Path;
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::{AudioEngine, VisualizerAnalyzer};
+use crate::spotify::{SpotifyEvent, SpotifyManager};
 use crate::ui::details::TrackDetails;
 use crate::ui::lyrics::LyricLine;
 use crate::ui::ThemeMode;
@@ -27,6 +29,11 @@ pub struct App {
     pub theme: ThemeMode,
     pub view_mode: CardViewMode,
 
+    // Spotify Integration
+    pub spotify: SpotifyManager,
+    pub spotify_rx: Receiver<SpotifyEvent>,
+    pub spotify_status: String,
+
     // Collapsible Playlists & Search
     pub show_playlists: bool,
     pub is_searching: bool,
@@ -49,6 +56,10 @@ impl App {
         let (audio_engine, _) = AudioEngine::new();
         let visualizer = VisualizerAnalyzer::new(32, 44100);
 
+        // Spotify background manager channel
+        let (spotify_tx, spotify_rx) = channel::<SpotifyEvent>();
+        let spotify = SpotifyManager::spawn(spotify_tx);
+
         // Load reference album art if available
         let cover_path = Path::new("/home/insane/spotify-terminal/example/cover.png");
         let album_cover = if cover_path.exists() {
@@ -66,7 +77,6 @@ impl App {
             "♥ Liked Songs (420)".to_string(),
         ];
 
-        // Authentic synced lyrics
         let lyrics = vec![
             LyricLine { time_ms: 0, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
             LyricLine { time_ms: 12_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
@@ -86,8 +96,8 @@ impl App {
             artist: "Roop Kumar Rathod, Mithoon".to_string(),
             release_year: "2007".to_string(),
             genre: "Sufi Fusion / Acoustic".to_string(),
-            format: "FLAC 24-bit / 96 kHz".to_string(),
-            bitrate: "Hi-Res Lossless ✦ 2840 kbps".to_string(),
+            format: "Spotify Web Stream".to_string(),
+            bitrate: "Ogg Vorbis 320 kbps".to_string(),
             tempo: "86 BPM".to_string(),
             key_signature: "D Minor".to_string(),
             up_next: vec![
@@ -102,7 +112,7 @@ impl App {
             current_track: "Maula Mere Maula".to_string(),
             current_artist: "Roop Kumar Rathod • Anwar".to_string(),
             current_album: "Anwar (2007)".to_string(),
-            duration: Duration::from_secs(364), // 6:04
+            duration: Duration::from_secs(364),
             is_playing: true,
             volume: 0.85,
             playback_time_ms: 42_000,
@@ -110,6 +120,10 @@ impl App {
             album_cover,
             theme: ThemeMode::DiscoIce,
             view_mode: CardViewMode::Lyrics,
+
+            spotify,
+            spotify_rx,
+            spotify_status: "Demo / Standby".to_string(),
 
             show_playlists: false,
             is_searching: false,
@@ -153,6 +167,37 @@ impl App {
 
         self.anim_time += dt;
 
+        // Drain background Spotify events
+        while let Ok(event) = self.spotify_rx.try_recv() {
+            match event {
+                SpotifyEvent::Connected(msg) => {
+                    self.spotify_status = msg;
+                    self.spotify.fetch_playlists();
+                }
+                SpotifyEvent::Disconnected(msg) => {
+                    self.spotify_status = msg;
+                }
+                SpotifyEvent::PlaybackUpdate(state) => {
+                    self.current_track = state.track_name;
+                    self.current_artist = state.artist_name;
+                    self.current_album = state.album_name.clone();
+                    self.track_details.album = state.album_name;
+                    self.track_details.artist = self.current_artist.clone();
+                    self.playback_time_ms = state.progress_ms;
+                    self.duration = Duration::from_millis(state.duration_ms);
+                    self.is_playing = state.is_playing;
+                }
+                SpotifyEvent::AlbumArtLoaded(img) => {
+                    self.album_cover = Some(img);
+                }
+                SpotifyEvent::PlaylistsLoaded(playlists) => {
+                    if !playlists.is_empty() {
+                        self.playlists = playlists;
+                    }
+                }
+            }
+        }
+
         if self.is_playing {
             self.playback_time_ms += (dt * 1000.0) as u64;
             if self.playback_time_ms > self.duration.as_millis() as u64 {
@@ -165,11 +210,23 @@ impl App {
 
     pub fn toggle_play(&mut self) {
         self.is_playing = !self.is_playing;
+        self.spotify.toggle_play();
     }
 
     pub fn stop(&mut self) {
         self.is_playing = false;
         self.playback_time_ms = 0;
+        self.spotify.toggle_play();
+    }
+
+    pub fn next_track(&mut self) {
+        self.playback_time_ms = 0;
+        self.spotify.next_track();
+    }
+
+    pub fn previous_track(&mut self) {
+        self.playback_time_ms = 0;
+        self.spotify.previous_track();
     }
 
     pub fn toggle_view_mode(&mut self) {
@@ -185,7 +242,9 @@ impl App {
 
     pub fn toggle_playlists(&mut self) {
         self.show_playlists = !self.show_playlists;
-        if !self.show_playlists {
+        if self.show_playlists {
+            self.spotify.fetch_playlists();
+        } else {
             self.is_searching = false;
         }
     }
