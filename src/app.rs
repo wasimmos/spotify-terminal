@@ -1,14 +1,10 @@
-use std::time::{Duration, Instant};
+use image::DynamicImage;
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::{AudioEngine, VisualizerAnalyzer};
 use crate::ui::lyrics::LyricLine;
-use crate::ui::Mood;
-
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum FocusedSection {
-    Search,
-    Playlists,
-}
+use crate::ui::ThemeMode;
 
 #[allow(dead_code)]
 pub struct App {
@@ -20,10 +16,13 @@ pub struct App {
     pub volume: f32,
     pub playback_time_ms: u64,
 
-    pub mood: Mood,
-    pub focused: FocusedSection,
-    pub search_query: String,
+    pub album_cover: Option<DynamicImage>,
+    pub theme: ThemeMode,
 
+    // Collapsible Playlists & Search
+    pub show_playlists: bool,
+    pub is_searching: bool,
+    pub search_query: String,
     pub playlists: Vec<String>,
     pub selected_playlist: usize,
 
@@ -39,46 +38,55 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let (audio_engine, _) = AudioEngine::new();
-        let visualizer = VisualizerAnalyzer::new(64, 44100);
+        let visualizer = VisualizerAnalyzer::new(32, 44100);
+
+        // Load reference album art if available
+        let cover_path = Path::new("/home/insane/spotify-terminal/example/cover.png");
+        let album_cover = if cover_path.exists() {
+            image::open(cover_path).ok()
+        } else {
+            None
+        };
 
         let playlists = vec![
-            "Cyberpunk Drive 2077".to_string(),
-            "Lo-Fi Coding Beats".to_string(),
-            "Synthwave Retrowave Vibes".to_string(),
-            "Late Night Tokyo Jazz".to_string(),
-            "Deep Focus Techno".to_string(),
-            "♥ Liked Songs (342)".to_string(),
+            "Bollywood Soul & Ghazals".to_string(),
+            "Late Night Acoustic & Lo-Fi".to_string(),
+            "Cyberpunk 2077 Synthwave".to_string(),
+            "Top 50 Global Favorites".to_string(),
+            "Coding Flow & Deep Focus".to_string(),
+            "♥ Liked Songs (420)".to_string(),
         ];
 
-        // Demo synced lyrics
+        // Authentic synced lyrics from the reference image
         let lyrics = vec![
-            LyricLine { time_ms: 0, text: "♪ (Synth Intro) ♪".to_string() },
-            LyricLine { time_ms: 8_000, text: "Waiting in a car".to_string() },
-            LyricLine { time_ms: 12_500, text: "Waiting for a ride in the dark".to_string() },
-            LyricLine { time_ms: 18_000, text: "The night city grows".to_string() },
-            LyricLine { time_ms: 22_500, text: "Look and see her eyes, they glow".to_string() },
-            LyricLine { time_ms: 28_000, text: "Waiting in a car".to_string() },
-            LyricLine { time_ms: 32_000, text: "Waiting for a ride in the dark".to_string() },
-            LyricLine { time_ms: 36_000, text: "The city is my church".to_string() },
-            LyricLine { time_ms: 41_000, text: "It wraps me in the blinding twilight".to_string() },
-            LyricLine { time_ms: 48_000, text: "Waiting in a car...".to_string() },
-            LyricLine { time_ms: 54_000, text: "The sky is full of electric dreams".to_string() },
-            LyricLine { time_ms: 60_000, text: "♪ (Saxophone & Synth Drop) ♪".to_string() },
+            LyricLine { time_ms: 0, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
+            LyricLine { time_ms: 12_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
+            LyricLine { time_ms: 24_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
+            LyricLine { time_ms: 36_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
+            LyricLine { time_ms: 42_000, text: "आँखें तेरी ...".to_string() },
+            LyricLine { time_ms: 48_000, text: "आँखें तेरी कितनी हसीं".to_string() },
+            LyricLine { time_ms: 55_000, text: "के इनका आशिक़ मैं बन गया हूँ".to_string() },
+            LyricLine { time_ms: 63_000, text: "मुझको बसा ले इनमें तू".to_string() },
+            LyricLine { time_ms: 72_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे (इश्क़ है)".to_string() },
+            LyricLine { time_ms: 84_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे (इश्क़ है)".to_string() },
+            LyricLine { time_ms: 96_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
         ];
 
         Self {
-            current_track: "Midnight City".to_string(),
-            current_artist: "M83".to_string(),
-            current_album: "Hurry Up, We're Dreaming".to_string(),
-            duration: Duration::from_secs(243),
+            current_track: "Maula Mere Maula".to_string(),
+            current_artist: "Roop Kumar Rathod • Anwar".to_string(),
+            current_album: "Anwar (2007)".to_string(),
+            duration: Duration::from_secs(364), // 6:04
             is_playing: true,
             volume: 0.85,
-            playback_time_ms: 18_500,
+            playback_time_ms: 42_000, // 0:42 matching screenshot
 
-            mood: Mood::Cyberpunk,
-            focused: FocusedSection::Playlists,
+            album_cover,
+            theme: ThemeMode::DiscoIce,
+
+            show_playlists: false,
+            is_searching: false,
             search_query: String::new(),
-
             playlists,
             selected_playlist: 0,
 
@@ -94,6 +102,21 @@ impl App {
 
     pub fn elapsed(&self) -> Duration {
         Duration::from_millis(self.playback_time_ms)
+    }
+
+    pub fn current_time_str(&self) -> String {
+        let total_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Local time offset approximation (India Standard Time UTC+5:30)
+        let local_secs = total_secs + (5 * 3600 + 30 * 60);
+        let hours = (local_secs / 3600) % 24;
+        let mins = (local_secs / 60) % 60;
+        let secs = local_secs % 60;
+
+        format!("{:02}:{:02}:{:02}", hours, mins, secs)
     }
 
     pub fn on_tick(&mut self) {
@@ -118,8 +141,20 @@ impl App {
         self.is_playing = !self.is_playing;
     }
 
-    pub fn cycle_mood(&mut self) {
-        self.mood = self.mood.next();
+    pub fn stop(&mut self) {
+        self.is_playing = false;
+        self.playback_time_ms = 0;
+    }
+
+    pub fn next_theme(&mut self) {
+        self.theme = self.theme.next();
+    }
+
+    pub fn toggle_playlists(&mut self) {
+        self.show_playlists = !self.show_playlists;
+        if !self.show_playlists {
+            self.is_searching = false;
+        }
     }
 
     pub fn next_playlist(&mut self) {

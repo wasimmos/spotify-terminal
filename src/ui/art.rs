@@ -5,18 +5,18 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::ui::theme::Mood;
+use crate::ui::theme::ThemeMode;
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
 
 pub struct AlbumArtWidget<'a> {
-    mood: Mood,
+    theme: ThemeMode,
     image: Option<&'a DynamicImage>,
     time: f32,
 }
 
 impl<'a> AlbumArtWidget<'a> {
-    pub fn new(mood: Mood, image: Option<&'a DynamicImage>, time: f32) -> Self {
-        Self { mood, image, time }
+    pub fn new(theme: ThemeMode, image: Option<&'a DynamicImage>, time: f32) -> Self {
+        Self { theme, image, time }
     }
 }
 
@@ -27,10 +27,10 @@ impl<'a> Widget for AlbumArtWidget<'a> {
         }
 
         let pixel_width = area.width as u32;
-        let pixel_height = (area.height * 2) as u32; // 2 vertical pixels per cell using '▀'
+        let pixel_height = (area.height * 2) as u32; // 2 vertical pixels per text cell using '▀'
 
         if let Some(img) = self.image {
-            // Resize image to fit area
+            // Resize image cleanly to target cell dimensions
             let resized = img.resize_exact(pixel_width, pixel_height, FilterType::Triangle);
             for y_cell in 0..area.height {
                 for x in 0..area.width {
@@ -53,7 +53,7 @@ impl<'a> Widget for AlbumArtWidget<'a> {
                 }
             }
         } else {
-            // Generate aesthetic procedural retro/synthwave album art
+            // Procedural aesthetic synthwave cover fallback
             for y_cell in 0..area.height {
                 for x in 0..area.width {
                     let top_y = (y_cell * 2) as f32;
@@ -64,7 +64,7 @@ impl<'a> Widget for AlbumArtWidget<'a> {
                         top_y,
                         pixel_width as f32,
                         pixel_height as f32,
-                        self.mood,
+                        self.theme,
                         self.time,
                     );
                     let bot_color = procedural_art_color(
@@ -72,7 +72,7 @@ impl<'a> Widget for AlbumArtWidget<'a> {
                         bot_y,
                         pixel_width as f32,
                         pixel_height as f32,
-                        self.mood,
+                        self.theme,
                         self.time,
                     );
 
@@ -85,63 +85,32 @@ impl<'a> Widget for AlbumArtWidget<'a> {
     }
 }
 
-/// Generates a synthwave sun + neon grid + horizon glow album artwork procedurally
-fn procedural_art_color(x: f32, y: f32, width: f32, height: f32, mood: Mood, time: f32) -> Color {
-    let nx = (x / width) * 2.0 - 1.0;  // -1.0 .. 1.0
-    let ny = (y / height) * 2.0 - 1.0; // -1.0 .. 1.0
-
-    let horizon = 0.15;
+fn procedural_art_color(x: f32, y: f32, width: f32, height: f32, theme: ThemeMode, time: f32) -> Color {
+    let nx = (x / width) * 2.0 - 1.0;
+    let ny = (y / height) * 2.0 - 1.0;
+    let horizon = 0.2;
 
     if ny < horizon {
-        // Sky & Glowing Sun
-        let sun_x = 0.0;
-        let sun_y = -0.15;
-        let sun_radius = 0.52;
-        let dist = ((nx - sun_x).powi(2) + (ny - sun_y).powi(2)).sqrt();
-
-        if dist < sun_radius {
-            // Horizontal laser cut lines through the sun
-            let line_phase = (ny * 22.0).sin();
-            if ny > -0.05 && line_phase > 0.4 {
-                // Sun slice background
-                mood.gradient_at(0.2)
+        let sun_dist = (nx * nx + (ny + 0.1).powi(2)).sqrt();
+        if sun_dist < 0.55 {
+            let line = (ny * 20.0).sin();
+            if ny > -0.05 && line > 0.45 {
+                theme.card_border()
             } else {
-                // Sun core gradient (warm neon center)
-                let sun_ratio = (ny - (sun_y - sun_radius)) / (sun_radius * 2.0);
-                mood.gradient_at(1.0 - sun_ratio.clamp(0.0, 1.0))
+                theme.title_color()
             }
         } else {
-            // Sky gradient (deep dark atmosphere)
-            let sky_ratio = ((ny + 1.0) / (horizon + 1.0)).clamp(0.0, 1.0);
-            let glow = (1.0 - (dist - sun_radius).clamp(0.0, 1.0)).powi(2) * 0.4;
-            let base = mood.gradient_at(0.05 + sky_ratio * 0.25);
-            tint_color(base, glow)
+            theme.bar_color_at(0.15)
         }
     } else {
-        // Perspective Grid / Floor
-        let depth = (ny - horizon) / (1.0 - horizon); // 0.0 near horizon, 1.0 at bottom
-        let grid_y = (1.0 / (depth + 0.08) + time * 0.6) % 1.0;
-        let grid_x = (nx / (depth + 0.15) * 1.5) % 1.0;
+        let depth = (ny - horizon) / (1.0 - horizon);
+        let grid_y = (1.0 / (depth + 0.1) + time * 0.5) % 1.0;
+        let grid_x = (nx / (depth + 0.2) * 1.5) % 1.0;
 
-        let on_grid = grid_y > 0.85 || grid_x.abs() > 0.85;
-
-        if on_grid {
-            mood.gradient_at(0.5 + depth * 0.4)
+        if grid_y > 0.88 || grid_x.abs() > 0.88 {
+            theme.progress_bar()
         } else {
-            // Floor reflection
-            let base = mood.gradient_at(0.1);
-            tint_color(base, (1.0 - depth) * 0.3)
+            theme.card_border()
         }
-    }
-}
-
-fn tint_color(c: Color, amount: f32) -> Color {
-    if let Color::Rgb(r, g, b) = c {
-        let r = ((r as f32) + (255.0 - r as f32) * amount).clamp(0.0, 255.0) as u8;
-        let g = ((g as f32) + (255.0 - g as f32) * amount).clamp(0.0, 255.0) as u8;
-        let b = ((b as f32) + (255.0 - b as f32) * amount).clamp(0.0, 255.0) as u8;
-        Color::Rgb(r, g, b)
-    } else {
-        c
     }
 }

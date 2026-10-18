@@ -5,31 +5,62 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::ui::theme::Mood;
+use crate::ui::theme::ThemeMode;
 use std::time::Duration;
 
-pub struct TransportControlsWidget {
+/// Transport controls placed directly beneath the album art
+pub struct AlbumSubControlsWidget {
     pub is_playing: bool,
-    pub elapsed: Duration,
-    pub total: Duration,
+    #[allow(dead_code)]
     pub volume: f32,
-    pub mood: Mood,
+    pub theme: ThemeMode,
 }
 
-impl Widget for TransportControlsWidget {
+impl Widget for AlbumSubControlsWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.height < 2 || area.width < 10 {
+        if area.width < 10 || area.height == 0 {
+            return;
+        }
+
+        let play_icon = if self.is_playing { "⏸" } else { "▶" };
+        let btns = format!("⏮   {}   ⏹   ⏭", play_icon);
+        let btns_len = btns.chars().count() as u16;
+
+        let x = area.x + (area.width.saturating_sub(btns_len)) / 2;
+        let y = area.y;
+
+        buf.set_string(
+            x,
+            y,
+            &btns,
+            Style::default()
+                .fg(self.theme.title_color())
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+}
+
+/// Middle progress bar and hotkey bar
+pub struct ProgressBarWidget {
+    pub elapsed: Duration,
+    pub total: Duration,
+    pub theme: ThemeMode,
+}
+
+impl Widget for ProgressBarWidget {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 12 || area.height == 0 {
             return;
         }
 
         let elapsed_secs = self.elapsed.as_secs();
         let total_secs = self.total.as_secs();
-        let elapsed_str = format!("{:02}:{:02}", elapsed_secs / 60, elapsed_secs % 60);
-        let total_str = format!("{:02}:{:02}", total_secs / 60, total_secs % 60);
 
-        // Line 1: Progress bar
-        let time_labels_len = (elapsed_str.len() + total_str.len() + 2) as u16;
-        let bar_width = area.width.saturating_sub(time_labels_len + 2) as usize;
+        let elapsed_str = format!("{}:{:02}", elapsed_secs / 60, elapsed_secs % 60);
+        let total_str = format!("{}:{:02}", total_secs / 60, total_secs % 60);
+
+        let labels_len = (elapsed_str.len() + total_str.len() + 4) as u16;
+        let bar_width = area.width.saturating_sub(labels_len) as usize;
 
         if bar_width > 4 {
             let progress = if total_secs > 0 {
@@ -51,43 +82,19 @@ impl Widget for TransportControlsWidget {
                 }
             }
 
-            // Draw time line
-            let y_time = area.y;
+            let y = area.y;
+            buf.set_string(area.x, y, &elapsed_str, Style::default().fg(Color::Rgb(160, 160, 175)));
             buf.set_string(
-                area.x,
-                y_time,
-                &elapsed_str,
-                Style::default().fg(Color::DarkGray),
-            );
-            buf.set_string(
-                area.x + elapsed_str.len() as u16 + 1,
-                y_time,
+                area.x + elapsed_str.len() as u16 + 2,
+                y,
                 &bar_str,
-                Style::default().fg(self.mood.primary_color()),
+                Style::default().fg(self.theme.progress_bar()),
             );
             buf.set_string(
                 area.right().saturating_sub(total_str.len() as u16),
-                y_time,
+                y,
                 &total_str,
-                Style::default().fg(Color::DarkGray),
-            );
-        }
-
-        // Line 2: Playback buttons
-        if area.height >= 2 {
-            let y_btns = area.y + 1;
-            let play_icon = if self.is_playing { " ⏸ " } else { " ▶ " };
-            let btns = format!("  ⏮  {}  ⏭   ⏹    🔊 {}%  ", play_icon, (self.volume * 100.0) as u32);
-            let btns_len = btns.chars().count() as u16;
-            let x_btns = area.x + (area.width.saturating_sub(btns_len)) / 2;
-
-            buf.set_string(
-                x_btns,
-                y_btns,
-                &btns,
-                Style::default()
-                    .fg(self.mood.primary_color())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Rgb(160, 160, 175)),
             );
         }
     }

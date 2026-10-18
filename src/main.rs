@@ -12,11 +12,11 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
-use app::{App, FocusedSection};
+use app::App;
 use ui::render_ui;
 
 fn main() -> Result<()> {
-    // Install panic hook to safely restore terminal if an unexpected crash occurs
+    // Panic hook to safely restore terminal on error
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -33,7 +33,7 @@ fn main() -> Result<()> {
 
     let mut app = App::new();
 
-    // 60 FPS target tick rate (~16ms)
+    // 60 FPS tick rate (~16ms)
     let tick_rate = Duration::from_millis(16);
 
     loop {
@@ -46,37 +46,66 @@ fn main() -> Result<()> {
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    match app.focused {
-                        FocusedSection::Search => match key.code {
-                            KeyCode::Esc | KeyCode::Enter => {
-                                app.focused = FocusedSection::Playlists;
+                    if app.show_playlists {
+                        // Modal is active
+                        if app.is_searching {
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Enter => {
+                                    app.is_searching = false;
+                                }
+                                KeyCode::Backspace => {
+                                    app.search_query.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    app.search_query.push(c);
+                                }
+                                _ => {}
                             }
-                            KeyCode::Backspace => {
-                                app.search_query.pop();
+                        } else {
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Char('P') => {
+                                    app.show_playlists = false;
+                                }
+                                KeyCode::Enter => {
+                                    app.show_playlists = false;
+                                }
+                                KeyCode::Char('/') => {
+                                    app.is_searching = true;
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    app.next_playlist();
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    app.prev_playlist();
+                                }
+                                _ => {}
                             }
-                            KeyCode::Char(c) => {
-                                app.search_query.push(c);
-                            }
-                            _ => {}
-                        },
-                        _ => match key.code {
-                            KeyCode::Char('q') => {
-                                app.should_quit = true;
-                            }
-                            KeyCode::Esc => {
+                        }
+                    } else {
+                        // Main player controls
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
                                 app.should_quit = true;
                             }
                             KeyCode::Char(' ') => {
                                 app.toggle_play();
                             }
-                            KeyCode::Char('m') => {
-                                app.cycle_mood();
+                            KeyCode::Char('s') => {
+                                app.stop();
                             }
-                            KeyCode::Char('j') | KeyCode::Down => {
-                                app.next_playlist();
+                            KeyCode::Char('P') | KeyCode::Tab => {
+                                app.toggle_playlists();
                             }
-                            KeyCode::Char('k') | KeyCode::Up => {
-                                app.prev_playlist();
+                            KeyCode::Char('t') | KeyCode::Char('m') => {
+                                app.next_theme();
+                            }
+                            KeyCode::Char('n') => {
+                                // Next track
+                                app.playback_time_ms = 0;
+                            }
+                            KeyCode::Char('p') => {
+                                // Previous track
+                                app.playback_time_ms = 0;
                             }
                             KeyCode::Char('+') | KeyCode::Char('=') => {
                                 app.volume_up();
@@ -84,19 +113,8 @@ fn main() -> Result<()> {
                             KeyCode::Char('-') => {
                                 app.volume_down();
                             }
-                            KeyCode::Char('/') => {
-                                app.focused = FocusedSection::Search;
-                            }
-                            KeyCode::Char('n') => {
-                                // Demo skip next
-                                app.playback_time_ms = 0;
-                            }
-                            KeyCode::Char('p') => {
-                                // Demo skip prev
-                                app.playback_time_ms = 0;
-                            }
                             _ => {}
-                        },
+                        }
                     }
                 }
             }
@@ -112,6 +130,6 @@ fn main() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
     terminal.show_cursor()?;
 
-    println!("👋 Thanks for playing! Exited cleanly.");
+    println!("👋 Thanks for using Disco Terminal! Exited cleanly.");
     Ok(())
 }

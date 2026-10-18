@@ -4,8 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::Widget,
 };
-
-use crate::ui::theme::Mood;
+use crate::ui::theme::ThemeMode;
 
 #[derive(Clone, Debug)]
 pub struct LyricLine {
@@ -16,34 +15,30 @@ pub struct LyricLine {
 pub struct LyricsWidget<'a> {
     lyrics: &'a [LyricLine],
     current_time_ms: u64,
-    mood: Mood,
+    theme: ThemeMode,
 }
 
 impl<'a> LyricsWidget<'a> {
-    pub fn new(lyrics: &'a [LyricLine], current_time_ms: u64, mood: Mood) -> Self {
+    pub fn new(lyrics: &'a [LyricLine], current_time_ms: u64, theme: ThemeMode) -> Self {
         Self {
             lyrics,
             current_time_ms,
-            mood,
+            theme,
         }
     }
 }
 
 impl<'a> Widget for LyricsWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < 10 || area.height < 3 || self.lyrics.is_empty() {
-            let msg = if self.lyrics.is_empty() {
-                "♪ No Synced Lyrics Available ♪"
-            } else {
-                "..."
-            };
+        if area.width < 10 || area.height < 2 || self.lyrics.is_empty() {
+            let msg = "♪ Instrumental / No Synced Lyrics ♪";
             let x = area.x + (area.width.saturating_sub(msg.len() as u16)) / 2;
             let y = area.y + area.height / 2;
             buf.set_string(x, y, msg, Style::default().fg(Color::DarkGray));
             return;
         }
 
-        // Find current lyric line index
+        // Find the active line index
         let mut active_idx = 0;
         for (i, line) in self.lyrics.iter().enumerate() {
             if self.current_time_ms >= line.time_ms {
@@ -53,12 +48,12 @@ impl<'a> Widget for LyricsWidget<'a> {
             }
         }
 
-        let center_y = area.y + area.height / 2;
+        let center_y = area.y + (area.height / 2);
 
         for (i, line) in self.lyrics.iter().enumerate() {
             let diff = i as i32 - active_idx as i32;
-            // Spacing: 2 terminal rows per lyric line for breathing room and readability
-            let line_y = center_y as i32 + diff * 2;
+            // 1 empty terminal row between lyrics for elegant typography & breathing room
+            let line_y = center_y as i32 + diff;
 
             if line_y < area.y as i32 || line_y >= area.bottom() as i32 {
                 continue;
@@ -67,34 +62,32 @@ impl<'a> Widget for LyricsWidget<'a> {
             let y = line_y as u16;
             let is_active = diff == 0;
 
-            let (text_to_draw, style) = if is_active {
-                let formatted = format!("✦  {}  ✦", line.text);
+            let (prefix, style) = if is_active {
                 (
-                    formatted,
+                    "▶  ",
                     Style::default()
-                        .fg(self.mood.primary_color())
+                        .fg(self.theme.active_lyric())
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                let distance = diff.abs();
-                let color = match distance {
-                    1 => self.mood.secondary_color(),
-                    2 => Color::Rgb(120, 120, 140),
-                    3 => Color::Rgb(80, 80, 95),
-                    _ => Color::Rgb(50, 50, 65),
+                let dist = diff.abs();
+                let color = match dist {
+                    1 => Color::Rgb(210, 210, 225), // Soft clean white-gray
+                    2 => Color::Rgb(140, 140, 155), // Muted gray
+                    3 => Color::Rgb(95, 95, 110),   // Faint gray
+                    _ => Color::Rgb(60, 60, 75),    // Deep faded gray
                 };
-                (line.text.clone(), Style::default().fg(color))
+                ("   ", Style::default().fg(color))
             };
 
-            // Center align text
-            let text_len = text_to_draw.chars().count() as u16;
-            let x = if text_len < area.width {
-                area.x + (area.width - text_len) / 2
-            } else {
-                area.x
-            };
+            let full_text = format!("{}{}", prefix, line.text);
 
-            buf.set_stringn(x, y, &text_to_draw, area.width as usize, style);
+            // Indented cleanly
+            let x = area.x + 2;
+            if x < area.right() {
+                let max_w = (area.right() - x) as usize;
+                buf.set_stringn(x, y, &full_text, max_w, style);
+            }
         }
     }
 }
