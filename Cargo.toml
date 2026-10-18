@@ -19,5 +19,6 @@ rspotify = { version = "0.13", features = ["cli"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 dotenvy = "0.15"
 futures = "0.3"
+webbrowser = "1.2"
 
 

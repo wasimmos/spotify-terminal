@@ -3,10 +3,12 @@ use image::DynamicImage;
 use rspotify::{
     model::{AdditionalType, PlayableItem},
     prelude::*,
-    scopes, AuthCodeSpotify, Credentials, OAuth,
+    scopes, AuthCodePkceSpotify, Credentials, OAuth,
 };
 use std::sync::mpsc::Sender;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc as tokio_mpsc;
 
 #[allow(dead_code)]
@@ -15,6 +17,7 @@ pub struct SpotifyPlaybackState {
     pub track_name: String,
     pub artist_name: String,
     pub album_name: String,
+    #[allow(dead_code)]
     pub album_art_url: Option<String>,
     pub progress_ms: u64,
     pub duration_ms: u64,
@@ -67,17 +70,18 @@ impl SpotifyManager {
             rt.block_on(async move {
                 dotenvy::dotenv().ok();
 
-                let creds = match Credentials::from_env() {
-                    Some(c) => c,
-                    None => {
+                let client_id = match std::env::var("RSPOTIFY_CLIENT_ID") {
+                    Ok(id) if !id.trim().is_empty() => id.trim().to_string(),
+                    _ => {
                         let _ = event_sender.send(SpotifyEvent::Disconnected(
-                            "No Spotify credentials found in .env (RSPOTIFY_CLIENT_ID / RSPOTIFY_CLIENT_SECRET)".to_string(),
+                            "No Spotify Client ID found. Set RSPOTIFY_CLIENT_ID in .env".to_string(),
                         ));
-                        // Keep listening for dummy commands or wait
                         while let Some(_cmd) = cmd_rx.recv().await {}
                         return;
                     }
                 };
+
+                let creds = Credentials::new_pkce(&client_id);
 
                 let oauth = OAuth {
                     redirect_uri: std::env::var("RSPOTIFY_REDIRECT_URI")
@@ -93,33 +97,45 @@ impl SpotifyManager {
                     ..Default::default()
                 };
 
-                let spotify = AuthCodeSpotify::new(creds, oauth);
+                let mut spotify = AuthCodePkceSpotify::new(creds, oauth);
 
-                let auth_url = match spotify.get_authorize_url(false) {
-                    Ok(url) => url,
-                    Err(e) => {
-                        let _ = event_sender.send(SpotifyEvent::Disconnected(format!("OAuth error: {}", e)));
-                        return;
-                    }
-                };
-
-                // Attempt to load token from cache
-                let token_res = spotify.read_token_cache(false).await;
-                let is_auth = match token_res {
-                    Ok(Some(tok)) => {
-                        *spotify.get_token().lock().await.unwrap() = Some(tok);
-                        true
-                    }
-                    _ => false,
-                };
+                // Attempt to read token from cache
+                let mut is_auth = false;
+                if let Ok(Some(tok)) = spotify.read_token_cache(false).await {
+                    *spotify.get_token().lock().await.unwrap() = Some(tok);
+                    is_auth = true;
+                    let _ = event_sender.send(SpotifyEvent::Connected("Spotify Connected (Cached)".to_string()));
+                }
 
                 if !is_auth {
+                    // Try to start local loopback listener on port 8888 for 1-click automatic auth
+                    let listener = TcpListener::bind("127.0.0.1:8888").await.ok();
+
+                    let auth_url = match spotify.get_authorize_url(None) {
+                        Ok(url) => url,
+                        Err(e) => {
+                            let _ = event_sender.send(SpotifyEvent::Disconnected(format!("OAuth error: {}", e)));
+                            return;
+                        }
+                    };
+
                     let _ = event_sender.send(SpotifyEvent::Disconnected(format!(
-                        "Authorize Spotify at: {}",
+                        "Login at: {}",
                         auth_url
                     )));
-                } else {
-                    let _ = event_sender.send(SpotifyEvent::Connected("Spotify Connected".to_string()));
+
+                    // Auto-open browser
+                    let _ = webbrowser::open(&auth_url);
+
+                    // Wait for the browser redirect callback on 127.0.0.1:8888
+                    if let Some(listener) = listener {
+                        if let Some(code) = wait_for_auth_code(listener).await {
+                            if let Ok(()) = spotify.request_token(&code).await {
+                                is_auth = true;
+                                let _ = event_sender.send(SpotifyEvent::Connected("Spotify Connected!".to_string()));
+                            }
+                        }
+                    }
                 }
 
                 let mut last_art_url: Option<String> = None;
@@ -228,4 +244,33 @@ impl SpotifyManager {
     pub fn fetch_playlists(&self) {
         let _ = self.cmd_sender.try_send(SpotifyCommand::FetchPlaylists);
     }
+}
+
+/// Listens on loopback port 8888 for the Spotify OAuth redirect and extracts the auth code
+async fn wait_for_auth_code(listener: TcpListener) -> Option<String> {
+    if let Ok((mut socket, _)) = listener.accept().await {
+        let mut buf = [0u8; 2048];
+        if let Ok(n) = socket.read(&mut buf).await {
+            let request = String::from_utf8_lossy(&buf[..n]);
+            if let Some(pos) = request.find("code=") {
+                let after = &request[pos + 5..];
+                let end = after.find('&').or_else(|| after.find(' ')).unwrap_or(after.len());
+                let code = after[..end].to_string();
+
+                let html = "<!DOCTYPE html><html><body style='font-family:system-ui,sans-serif;text-align:center;padding:60px;background:#100e18;color:#eee'>\
+                    <h1 style='color:#32ff78;font-size:2rem'>✦ Spotify Connected Successfully!</h1>\
+                    <p style='color:#aaa;font-size:1.1rem'>You can now close this browser tab and return to <b>wasimmos</b> player.</p>\
+                    </body></html>";
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                    html.len(),
+                    html
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                return Some(code);
+            }
+        }
+    }
+    None
 }
