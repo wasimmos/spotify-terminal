@@ -74,7 +74,8 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
 
     if inner_card.width > 20 && inner_card.height > 6 {
         // Calculate square cover geometry
-        let max_art_rows = inner_card.height.saturating_sub(1);
+        let ctrl_height = if inner_card.height >= 11 { 2u16 } else { 1u16 };
+        let max_art_rows = inner_card.height.saturating_sub(ctrl_height);
         let album_col_width: u16 = if inner_card.width > 100 { 26 } else if inner_card.width > 80 { 22 } else { 18 };
         let square_rows = (album_col_width / 2).min(max_art_rows);
 
@@ -94,13 +95,26 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(square_rows), // Album cover positioned at top
-                Constraint::Length(1),           // Transport controls directly beneath cover
+                Constraint::Length(ctrl_height), // Transport controls directly beneath cover
                 Constraint::Min(0),              // Remaining spacer
             ])
             .split(left_album_pane);
 
         let art_area = left_chunks[0];
         let sub_controls_area = left_chunks[1];
+
+        // Save interactive button bounds for mouse clicking
+        let btn_w = 3u16;
+        let gap_w = 2u16;
+        let total_btn_w = btn_w * 4 + gap_w * 3;
+        let start_x = sub_controls_area.x + sub_controls_area.width.saturating_sub(total_btn_w) / 2;
+        let btn_y = sub_controls_area.y;
+
+        app.btn_prev_rect = Some(ratatui::layout::Rect::new(start_x, btn_y, btn_w, ctrl_height));
+        app.btn_play_rect = Some(ratatui::layout::Rect::new(start_x + btn_w + gap_w, btn_y, btn_w, ctrl_height));
+        app.btn_stop_rect = Some(ratatui::layout::Rect::new(start_x + (btn_w + gap_w) * 2, btn_y, btn_w, ctrl_height));
+        app.btn_next_rect = Some(ratatui::layout::Rect::new(start_x + (btn_w + gap_w) * 3, btn_y, btn_w, ctrl_height));
+        app.progress_rect = Some(progress_area);
 
         // Render Album Art: use high-resolution graphics protocol if available, or procedural fallback
         if let Some(ref mut image_state) = app.album_image_state {

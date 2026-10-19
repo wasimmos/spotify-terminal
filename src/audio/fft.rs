@@ -142,38 +142,49 @@ impl VisualizerAnalyzer {
 
             let avg = if bin_count > 0 { bin_sum / bin_count as f32 } else { 0.0 };
 
-            // Equal-loudness contour weighting (boost highs logarithmically)
-            let freq_boost = 1.0 + (bar_idx as f32 / num_bars as f32).powf(0.7) * 4.8;
-            // Dynamic logarithmic scaling
-            let val = (avg * freq_boost * 4.5).powf(0.72);
+            // Equal-loudness contour weighting (boost highs smoothly)
+            let freq_boost = 1.0 + (bar_idx as f32 / num_bars as f32).powf(0.75) * 3.6;
+            // Acoustic loudness compression using sqrt
+            let val = (avg * freq_boost * 3.8).sqrt();
             *band = val.clamp(0.0, 1.0);
         }
 
-        // 7. Smooth bands: instant rise on audio beats, smooth gravity fall
+        // 7. Temporal envelope: smooth attack + silky decay (no jitter / eye strain)
         for i in 0..num_bars {
-            let current = raw_bands[i];
-            if current > self.bands[i] {
-                // Instant rise on transients
-                self.bands[i] = current;
-            } else {
-                // Smooth decay
-                self.bands[i] = (self.bands[i] * self.gravity).max(0.0);
+            let target = raw_bands[i];
+            let diff = target - self.bands[i];
+
+            // Micro-deadband: ignore tiny noise jitter (< 1.5%) to prevent resting buzz
+            if diff.abs() < 0.015 {
+                continue;
             }
 
-            // Peak markers
+            if diff > 0.0 {
+                // Controlled attack (0.42): bars rise smoothly with beats without harsh single-frame jumping
+                self.bands[i] += diff * 0.42;
+            } else {
+                // Gentle, silky decay (0.88): fluid downward glide
+                self.bands[i] = (self.bands[i] * 0.88).max(0.0);
+            }
+
+            if self.bands[i] < 0.01 {
+                self.bands[i] = 0.0;
+            }
+
+            // Smooth peak markers
             if self.bands[i] >= self.peaks[i] {
                 self.peaks[i] = self.bands[i];
-                self.peak_speeds[i] = 0.005;
+                self.peak_speeds[i] = 0.003;
             } else {
-                self.peak_speeds[i] += 0.003;
+                self.peak_speeds[i] += 0.002;
                 self.peaks[i] = (self.peaks[i] - self.peak_speeds[i]).max(0.0);
             }
         }
 
-        // 8. Neighbor smoothing for liquid CAVA-style visualizer waves
+        // 8. Spatial smoothing for liquid, hypnotic CAVA-style visualizer waves
         let mut smoothed = self.bands.clone();
         for i in 1..num_bars - 1 {
-            smoothed[i] = 0.20 * self.bands[i - 1] + 0.60 * self.bands[i] + 0.20 * self.bands[i + 1];
+            smoothed[i] = 0.22 * self.bands[i - 1] + 0.56 * self.bands[i] + 0.22 * self.bands[i + 1];
         }
         self.bands = smoothed;
     }

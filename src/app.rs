@@ -56,6 +56,13 @@ pub struct App {
     // Track change detection
     last_track_id: String,
     pub album_area: Option<ratatui::layout::Rect>,
+
+    // Interactive mouse targets
+    pub btn_prev_rect: Option<ratatui::layout::Rect>,
+    pub btn_play_rect: Option<ratatui::layout::Rect>,
+    pub btn_stop_rect: Option<ratatui::layout::Rect>,
+    pub btn_next_rect: Option<ratatui::layout::Rect>,
+    pub progress_rect: Option<ratatui::layout::Rect>,
 }
 
 impl App {
@@ -134,6 +141,12 @@ impl App {
 
             last_track_id: String::new(),
             album_area: None,
+
+            btn_prev_rect: None,
+            btn_play_rect: None,
+            btn_stop_rect: None,
+            btn_next_rect: None,
+            progress_rect: None,
         }
     }
 
@@ -254,10 +267,55 @@ impl App {
         self.spotify.toggle_play();
     }
 
+    #[allow(dead_code)]
+    pub fn play(&mut self) {
+        self.is_playing = true;
+        self.spotify.play();
+    }
+
+    #[allow(dead_code)]
+    pub fn pause(&mut self) {
+        self.is_playing = false;
+        self.spotify.pause();
+    }
+
     pub fn stop(&mut self) {
         self.is_playing = false;
         self.playback_time_ms = 0;
-        self.spotify.toggle_play();
+        self.spotify.pause();
+    }
+
+    pub fn seek(&mut self, position_ms: u64) {
+        self.playback_time_ms = position_ms;
+        self.spotify.seek(position_ms);
+    }
+
+    pub fn handle_mouse_click(&mut self, col: u16, row: u16) {
+        let is_in = |rect: Option<ratatui::layout::Rect>| -> bool {
+            if let Some(r) = rect {
+                col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+            } else {
+                false
+            }
+        };
+
+        if is_in(self.btn_prev_rect) {
+            self.previous_track();
+        } else if is_in(self.btn_play_rect) {
+            self.toggle_play();
+        } else if is_in(self.btn_stop_rect) {
+            self.stop();
+        } else if is_in(self.btn_next_rect) {
+            self.next_track();
+        } else if is_in(self.progress_rect) {
+            if let Some(r) = self.progress_rect {
+                if r.width > 0 && self.duration.as_millis() > 0 {
+                    let ratio = (col.saturating_sub(r.x) as f32 / r.width as f32).clamp(0.0, 1.0);
+                    let target_ms = (ratio * self.duration.as_millis() as f32) as u64;
+                    self.seek(target_ms);
+                }
+            }
+        }
     }
 
     pub fn next_track(&mut self) {

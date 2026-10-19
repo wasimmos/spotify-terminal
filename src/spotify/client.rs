@@ -41,8 +41,11 @@ pub enum SpotifyEvent {
 #[derive(Debug)]
 pub enum SpotifyCommand {
     TogglePlay,
+    Play,
+    Pause,
     NextTrack,
     PreviousTrack,
+    Seek(u64),
     FetchPlaylists,
 }
 
@@ -245,35 +248,86 @@ impl SpotifyManager {
                         Some(cmd) = cmd_rx.recv() => {
                             match cmd {
                                 SpotifyCommand::TogglePlay => {
-                                    match spotify.current_playback(None, None::<&[rspotify::model::AdditionalType]>).await {
-                                        Ok(Some(p)) => {
-                                            if p.is_playing {
-                                                let _ = spotify.pause_playback(None).await;
-                                            } else {
-                                                let _ = spotify.resume_playback(None, None).await;
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            if let Ok(devices) = spotify.device().await {
-                                                if let Some(dev) = devices.first() {
-                                                    if let Some(ref dev_id) = dev.id {
-                                                        let _ = spotify.transfer_playback(dev_id, Some(true)).await;
-                                                    }
+                                    if let Some(token) = api_get_token(&spotify).await {
+                                        let client = reqwest::Client::new();
+                                        let is_playing = if let Ok(resp) = client
+                                            .get("https://api.spotify.com/v1/me/player")
+                                            .bearer_auth(&token)
+                                            .send()
+                                            .await
+                                        {
+                                            if let Ok(text) = resp.text().await {
+                                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                                                    val["is_playing"].as_bool().unwrap_or(false)
+                                                } else {
+                                                    false
                                                 }
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_playing {
+                                            let _ = send_player_cmd(&client, &token, reqwest::Method::PUT, "pause").await;
+                                        } else {
+                                            let ok = send_player_cmd(&client, &token, reqwest::Method::PUT, "play").await;
+                                            if !ok {
+                                                activate_device_and_play(&client, &token).await;
                                             }
                                         }
-                                        Err(_) => {}
+                                        tokio::time::sleep(Duration::from_millis(250)).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                    }
+                                }
+                                SpotifyCommand::Play => {
+                                    if let Some(token) = api_get_token(&spotify).await {
+                                        let client = reqwest::Client::new();
+                                        let ok = send_player_cmd(&client, &token, reqwest::Method::PUT, "play").await;
+                                        if !ok {
+                                            activate_device_and_play(&client, &token).await;
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(250)).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                    }
+                                }
+                                SpotifyCommand::Pause => {
+                                    if let Some(token) = api_get_token(&spotify).await {
+                                        let client = reqwest::Client::new();
+                                        let _ = send_player_cmd(&client, &token, reqwest::Method::PUT, "pause").await;
+                                        tokio::time::sleep(Duration::from_millis(250)).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
                                     }
                                 }
                                 SpotifyCommand::NextTrack => {
-                                    let _ = spotify.next_track(None).await;
-                                    tokio::time::sleep(Duration::from_millis(300)).await;
-                                    poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                    if let Some(token) = api_get_token(&spotify).await {
+                                        let client = reqwest::Client::new();
+                                        let _ = send_player_cmd(&client, &token, reqwest::Method::POST, "next").await;
+                                        tokio::time::sleep(Duration::from_millis(300)).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                    }
                                 }
                                 SpotifyCommand::PreviousTrack => {
-                                    let _ = spotify.previous_track(None).await;
-                                    tokio::time::sleep(Duration::from_millis(300)).await;
-                                    poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                    if let Some(token) = api_get_token(&spotify).await {
+                                        let client = reqwest::Client::new();
+                                        let _ = send_player_cmd(&client, &token, reqwest::Method::POST, "previous").await;
+                                        tokio::time::sleep(Duration::from_millis(300)).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                    }
+                                }
+                                SpotifyCommand::Seek(pos_ms) => {
+                                    if let Some(token) = api_get_token(&spotify).await {
+                                        let client = reqwest::Client::new();
+                                        let url = format!("https://api.spotify.com/v1/me/player/seek?position_ms={}", pos_ms);
+                                        let _ = client.put(&url)
+                                            .bearer_auth(&token)
+                                            .header("Content-Length", "0")
+                                            .send()
+                                            .await;
+                                        tokio::time::sleep(Duration::from_millis(200)).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                    }
                                 }
                                 SpotifyCommand::FetchPlaylists => {
                                     fetch_and_send_playlists(&spotify, &event_sender).await;
@@ -296,6 +350,14 @@ impl SpotifyManager {
         let _ = self.cmd_sender.try_send(SpotifyCommand::TogglePlay);
     }
 
+    pub fn play(&self) {
+        let _ = self.cmd_sender.try_send(SpotifyCommand::Play);
+    }
+
+    pub fn pause(&self) {
+        let _ = self.cmd_sender.try_send(SpotifyCommand::Pause);
+    }
+
     pub fn next_track(&self) {
         let _ = self.cmd_sender.try_send(SpotifyCommand::NextTrack);
     }
@@ -304,8 +366,67 @@ impl SpotifyManager {
         let _ = self.cmd_sender.try_send(SpotifyCommand::PreviousTrack);
     }
 
+    pub fn seek(&self, position_ms: u64) {
+        let _ = self.cmd_sender.try_send(SpotifyCommand::Seek(position_ms));
+    }
+
     pub fn fetch_playlists(&self) {
         let _ = self.cmd_sender.try_send(SpotifyCommand::FetchPlaylists);
+    }
+}
+
+async fn api_get_token(spotify: &AuthCodePkceSpotify) -> Option<String> {
+    match spotify.get_token().lock().await {
+        Ok(guard) => guard.as_ref().map(|t| t.access_token.clone()),
+        Err(_) => None,
+    }
+}
+
+async fn send_player_cmd(
+    client: &reqwest::Client,
+    token: &str,
+    method: reqwest::Method,
+    endpoint: &str,
+) -> bool {
+    let url = format!("https://api.spotify.com/v1/me/player/{}", endpoint);
+    if let Ok(resp) = client
+        .request(method, &url)
+        .bearer_auth(token)
+        .header("Content-Length", "0")
+        .send()
+        .await
+    {
+        resp.status().is_success()
+    } else {
+        false
+    }
+}
+
+async fn activate_device_and_play(client: &reqwest::Client, token: &str) {
+    if let Ok(resp) = client
+        .get("https://api.spotify.com/v1/me/player/devices")
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        if let Ok(val) = resp.json::<serde_json::Value>().await {
+            if let Some(devices) = val["devices"].as_array() {
+                if let Some(dev) = devices.first() {
+                    if let Some(dev_id) = dev["id"].as_str() {
+                        let body = serde_json::json!({
+                            "device_ids": [dev_id],
+                            "play": true
+                        });
+                        let _ = client
+                            .put("https://api.spotify.com/v1/me/player")
+                            .bearer_auth(token)
+                            .json(&body)
+                            .send()
+                            .await;
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -7,7 +7,7 @@ use std::io::{stdout, Result};
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -21,14 +21,19 @@ fn main() -> Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = execute!(stdout(), LeaveAlternateScreen, crossterm::cursor::Show, DisableMouseCapture);
         original_hook(panic_info);
     }));
 
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::cursor::Hide,
+        EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -55,8 +60,9 @@ fn main() -> Result<()> {
         })?;
 
         if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
                     if app.show_playlists {
                         // Modal is active
                         if app.is_searching {
@@ -133,17 +139,24 @@ fn main() -> Result<()> {
                     }
                 }
             }
-        }
-
-        if app.should_quit {
-            break;
+            Event::Mouse(mouse) => {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    app.handle_mouse_click(mouse.column, mouse.row);
+                }
+            }
+            _ => {}
         }
     }
 
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
-    terminal.show_cursor()?;
+    if app.should_quit {
+        break;
+    }
+}
+
+// Restore terminal
+disable_raw_mode()?;
+execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show, DisableMouseCapture)?;
+terminal.show_cursor()?;
 
     println!("👋 Thanks for using wasimmos player! Exited cleanly.");
     Ok(())

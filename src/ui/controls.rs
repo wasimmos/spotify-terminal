@@ -22,41 +22,68 @@ impl Widget for AlbumSubControlsWidget {
 
         let play_icon = if self.is_playing { " ⏸ " } else { " ▶ " };
         let prev_icon = " ⏮ ";
+        let stop_icon = " ⏹ ";
         let next_icon = " ⏭ ";
 
         let accent_bg = self.theme.title_color();
         let accent_fg = Color::Rgb(16, 14, 26);
-        let normal_bg = Color::Rgb(38, 34, 52);
-        let normal_fg = Color::Rgb(220, 220, 240);
+        let pill_bg = Color::Rgb(36, 32, 50);
+        let icon_fg = Color::Rgb(220, 220, 240);
+        let stop_fg = Color::Rgb(240, 140, 140);
 
-        // 3 buttons of 3 chars each + 2 gaps of 2 spaces = 13 chars
-        let total_w: u16 = 13;
+        // 4 buttons of 3 chars each + 3 gaps of 2 spaces = 18 chars
+        let btn_w: u16 = 3;
+        let gap_w: u16 = 2;
+        let total_w: u16 = btn_w * 4 + gap_w * 3;
         let start_x = area.x + area.width.saturating_sub(total_w) / 2;
         let y = area.y;
 
-        // Previous button
+        let prev_x = start_x;
+        let play_x = start_x + btn_w + gap_w;
+        let stop_x = start_x + (btn_w + gap_w) * 2;
+        let next_x = start_x + (btn_w + gap_w) * 3;
+
+        // 1. Previous button
         buf.set_string(
-            start_x,
+            prev_x,
             y,
             prev_icon,
-            Style::default().fg(normal_fg).bg(normal_bg).add_modifier(Modifier::BOLD),
+            Style::default().fg(icon_fg).bg(pill_bg).add_modifier(Modifier::BOLD),
         );
 
-        // Play/Pause button (Hero button with accent color)
+        // 2. Play/Pause button (Hero button with accent color)
         buf.set_string(
-            start_x + 5,
+            play_x,
             y,
             play_icon,
             Style::default().fg(accent_fg).bg(accent_bg).add_modifier(Modifier::BOLD),
         );
 
-        // Next button
+        // 3. Stop button
         buf.set_string(
-            start_x + 10,
+            stop_x,
+            y,
+            stop_icon,
+            Style::default().fg(stop_fg).bg(pill_bg).add_modifier(Modifier::BOLD),
+        );
+
+        // 4. Next button
+        buf.set_string(
+            next_x,
             y,
             next_icon,
-            Style::default().fg(normal_fg).bg(normal_bg).add_modifier(Modifier::BOLD),
+            Style::default().fg(icon_fg).bg(pill_bg).add_modifier(Modifier::BOLD),
         );
+
+        // Optional row 2: hotkey hints centered below each button
+        if area.height >= 2 {
+            let hint_y = area.y + 1;
+            let hint_style = Style::default().fg(Color::Rgb(105, 100, 125));
+            buf.set_string(prev_x, hint_y, " p ", hint_style);
+            buf.set_string(play_x, hint_y, "spc", hint_style);
+            buf.set_string(stop_x, hint_y, " s ", hint_style);
+            buf.set_string(next_x, hint_y, " n ", hint_style);
+        }
     }
 }
 
