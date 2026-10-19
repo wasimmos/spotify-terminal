@@ -75,7 +75,12 @@ impl SpotifyManager {
             };
 
             rt.block_on(async move {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/insane".to_string());
+
+                // Search standard config directory first, then repository folder, then current working directory
                 dotenvy::dotenv().ok();
+                dotenvy::from_path(format!("{}/.config/spotif/.env", home)).ok();
+                dotenvy::from_path(format!("{}/spotify-terminal/.env", home)).ok();
 
                 let client_id = match std::env::var("RSPOTIFY_CLIENT_ID") {
                     Ok(id) if !id.trim().is_empty() => id.trim().to_string(),
@@ -104,10 +109,15 @@ impl SpotifyManager {
                     ..Default::default()
                 };
 
-                let cache_file = PathBuf::from(
-                    std::env::var("HOME").unwrap_or_else(|_| "/home/insane".to_string())
-                        + "/spotify-terminal/.spotify_token_cache.json",
-                );
+                let config_cache = PathBuf::from(format!("{}/.config/spotif/token_cache.json", home));
+                let legacy_cache = PathBuf::from(format!("{}/spotify-terminal/.spotify_token_cache.json", home));
+                let cache_file = if config_cache.exists() {
+                    config_cache
+                } else if legacy_cache.exists() {
+                    legacy_cache
+                } else {
+                    config_cache
+                };
 
                 let config = Config {
                     token_cached: true,
@@ -556,7 +566,10 @@ fn handle_playback_json(
             tokio::spawn(async move {
                 if let Ok(resp) = reqwest::get(&url_clone).await {
                     if let Ok(bytes) = resp.bytes().await {
-                        let _ = std::fs::write("/home/insane/spotify-terminal/.current_cover.png", &bytes);
+                        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/insane".to_string());
+                        let _ = std::fs::create_dir_all(format!("{}/.config/spotif", home));
+                        let _ = std::fs::write(format!("{}/.config/spotif/current_cover.png", home), &bytes);
+                        let _ = std::fs::write(format!("{}/spotify-terminal/.current_cover.png", home), &bytes);
                         if let Ok(img) = image::load_from_memory(&bytes) {
                             let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
                         }
@@ -661,7 +674,10 @@ async fn fetch_recent_or_idle_track(
                                 tokio::spawn(async move {
                                     if let Ok(resp) = reqwest::get(&url_clone).await {
                                         if let Ok(bytes) = resp.bytes().await {
-                                            let _ = std::fs::write("/home/insane/spotify-terminal/.current_cover.png", &bytes);
+                                            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/insane".to_string());
+                                            let _ = std::fs::create_dir_all(format!("{}/.config/spotif", home));
+                                            let _ = std::fs::write(format!("{}/.config/spotif/current_cover.png", home), &bytes);
+                                            let _ = std::fs::write(format!("{}/spotify-terminal/.current_cover.png", home), &bytes);
                                             if let Ok(img) = image::load_from_memory(&bytes) {
                                                 let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
                                             }

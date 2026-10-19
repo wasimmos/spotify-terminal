@@ -27,12 +27,18 @@ impl<'a> Widget for VisualizerWidget<'a> {
             return;
         }
 
-        // Discrete wide bars: bar_width = 2, gap_width = 1 (or 3/1 on very wide screens)
-        let bar_width: u16 = if area.width > 120 { 3 } else { 2 };
-        let gap_width: u16 = 1;
+        // Larger, chunky bars with breathing room
+        let bar_width: u16 = if area.width > 130 {
+            5
+        } else if area.width > 90 {
+            4
+        } else {
+            3
+        };
+        let gap_width: u16 = if bar_width >= 4 { 2 } else { 1 };
         let slot_width = bar_width + gap_width;
 
-        let num_bars = ((area.width + gap_width) / slot_width) as usize;
+        let num_bars = ((area.width + gap_width) / slot_width).saturating_sub(2).max(12) as usize;
         if num_bars == 0 {
             return;
         }

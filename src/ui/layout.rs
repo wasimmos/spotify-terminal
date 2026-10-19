@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::{App, CardViewMode};
 use crate::ui::{
     art::AlbumArtWidget,
-    controls::{AlbumSubControlsWidget, ProgressBarWidget},
+    controls::ProgressBarWidget,
     details::SongDetailsWidget,
     lyrics::LyricsWidget,
     playlist_modal::PlaylistModalWidget,
@@ -73,11 +73,8 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     f.render_widget(card_block, card_area);
 
     if inner_card.width > 20 && inner_card.height > 6 {
-        // Calculate square cover geometry
-        let ctrl_height = if inner_card.height >= 11 { 2u16 } else { 1u16 };
-        let max_art_rows = inner_card.height.saturating_sub(ctrl_height);
-        let album_col_width: u16 = if inner_card.width > 100 { 26 } else if inner_card.width > 80 { 22 } else { 18 };
-        let square_rows = (album_col_width / 2).min(max_art_rows);
+        // Calculate square cover geometry: album pane takes ~24-28 columns
+        let album_col_width: u16 = if inner_card.width > 100 { 28 } else if inner_card.width > 80 { 24 } else { 20 };
 
         let card_horiz = Layout::default()
             .direction(Direction::Horizontal)
@@ -90,31 +87,8 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         let left_album_pane = card_horiz[0];
         let right_content_pane = card_horiz[1];
 
-        // Left Pane: Album Art at top + transport controls directly below (zero gap!)
-        let left_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(square_rows), // Album cover positioned at top
-                Constraint::Length(ctrl_height), // Transport controls directly beneath cover
-                Constraint::Min(0),              // Remaining spacer
-            ])
-            .split(left_album_pane);
-
-        let art_area = left_chunks[0];
-        let sub_controls_area = left_chunks[1];
-
-        // Save interactive button bounds for mouse clicking
-        let btn_w = 3u16;
-        let gap_w = 2u16;
-        let total_btn_w = btn_w * 4 + gap_w * 3;
-        let start_x = sub_controls_area.x + sub_controls_area.width.saturating_sub(total_btn_w) / 2;
-        let btn_y = sub_controls_area.y;
-
-        app.btn_prev_rect = Some(ratatui::layout::Rect::new(start_x, btn_y, btn_w, ctrl_height));
-        app.btn_play_rect = Some(ratatui::layout::Rect::new(start_x + btn_w + gap_w, btn_y, btn_w, ctrl_height));
-        app.btn_stop_rect = Some(ratatui::layout::Rect::new(start_x + (btn_w + gap_w) * 2, btn_y, btn_w, ctrl_height));
-        app.btn_next_rect = Some(ratatui::layout::Rect::new(start_x + (btn_w + gap_w) * 3, btn_y, btn_w, ctrl_height));
-        app.progress_rect = Some(progress_area);
+        // Left Pane: Clean album art without buttons underneath
+        let art_area = left_album_pane;
 
         // Render Album Art: use high-resolution graphics protocol if available, or procedural fallback
         if let Some(ref mut image_state) = app.album_image_state {
@@ -127,15 +101,6 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
                 art_area,
             );
         }
-
-        // Render sleek Transport Controls directly below Album Art
-        f.render_widget(
-            AlbumSubControlsWidget {
-                is_playing: app.is_playing,
-                theme,
-            },
-            sub_controls_area,
-        );
 
         // Right Pane: Header (Song title + Playing Badge) + Body (Lyrics / Details)
         // Taking header to 2 rows moves lyrics higher up
@@ -197,6 +162,8 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     // ==========================================
     // 3. MIDDLE PROGRESS BAR ONLY (Clean & Minimalist!)
     // ==========================================
+    app.progress_rect = Some(progress_area);
+
     f.render_widget(
         ProgressBarWidget {
             elapsed: app.elapsed(),
@@ -207,11 +174,18 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     );
 
     // ==========================================
-    // 4. BOTTOM CAVA VISUALIZER (90% size of reference)
+    // 4. BOTTOM CAVA VISUALIZER (Large, wide bars with breathing room)
     // ==========================================
-    let bar_width = if visualizer_area.width > 120 { 3 } else { 2 };
-    let gap_width = 1;
-    let num_bars = ((visualizer_area.width + gap_width) / (bar_width + gap_width)) as usize;
+    let bar_width: u16 = if visualizer_area.width > 130 {
+        5
+    } else if visualizer_area.width > 90 {
+        4
+    } else {
+        3
+    };
+    let gap_width: u16 = if bar_width >= 4 { 2 } else { 1 };
+    let slot_width = bar_width + gap_width;
+    let num_bars = ((visualizer_area.width + gap_width) / slot_width).saturating_sub(2).max(12) as usize;
     app.visualizer.resize_bars(num_bars);
 
     f.render_widget(

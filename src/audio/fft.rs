@@ -8,6 +8,8 @@ pub struct VisualizerAnalyzer {
     window: Vec<f32>,
     /// Smoothed output amplitudes (0.0 .. 1.0) for each frequency band
     pub bands: Vec<f32>,
+    /// Temporal filter history for raw FFT targets
+    pub prev_raw: Vec<f32>,
     /// Peak values for peak indicators
     pub peaks: Vec<f32>,
     /// Decay speeds for peaks
@@ -35,15 +37,17 @@ impl VisualizerAnalyzer {
             planner,
             window,
             bands: vec![0.0; num_bars],
+            prev_raw: vec![0.0; num_bars],
             peaks: vec![0.0; num_bars],
             peak_speeds: vec![0.0; num_bars],
-            gravity: 0.85, // Smooth, organic CAVA falloff
+            gravity: 0.90, // Smooth, organic CAVA falloff
         }
     }
 
     pub fn resize_bars(&mut self, num_bars: usize) {
         if self.bands.len() != num_bars {
             self.bands.resize(num_bars, 0.0);
+            self.prev_raw.resize(num_bars, 0.0);
             self.peaks.resize(num_bars, 0.0);
             self.peak_speeds.resize(num_bars, 0.0);
         }
@@ -57,9 +61,12 @@ impl VisualizerAnalyzer {
                 *b = 0.0;
             }
         }
+        for r in self.prev_raw.iter_mut() {
+            *r = (*r * 0.90).max(0.0);
+        }
         for (i, p) in self.peaks.iter_mut().enumerate() {
             if i < self.peak_speeds.len() {
-                self.peak_speeds[i] += 0.004;
+                self.peak_speeds[i] += 0.003;
                 *p = (*p - self.peak_speeds[i]).max(0.0);
             }
         }
@@ -149,22 +156,30 @@ impl VisualizerAnalyzer {
             *band = val.clamp(0.0, 1.0);
         }
 
-        // 7. Temporal envelope: smooth attack + silky decay (no jitter / eye strain)
+        // Temporal low-pass filter on raw targets: removes single-frame jumping and high-frequency buzzing
+        for i in 0..num_bars {
+            if i < self.prev_raw.len() {
+                self.prev_raw[i] = self.prev_raw[i] * 0.55 + raw_bands[i] * 0.45;
+                raw_bands[i] = self.prev_raw[i];
+            }
+        }
+
+        // 7. Temporal envelope: gentle attack + silky decay (no jitter / eye strain)
         for i in 0..num_bars {
             let target = raw_bands[i];
             let diff = target - self.bands[i];
 
-            // Micro-deadband: ignore tiny noise jitter (< 1.5%) to prevent resting buzz
-            if diff.abs() < 0.015 {
+            // Micro-deadband: ignore tiny noise jitter (< 2.5%) to prevent resting buzz
+            if diff.abs() < 0.025 {
                 continue;
             }
 
             if diff > 0.0 {
-                // Controlled attack (0.42): bars rise smoothly with beats without harsh single-frame jumping
-                self.bands[i] += diff * 0.42;
+                // Gentle attack (0.28): bars swell organically with rhythm without harsh vibration
+                self.bands[i] += diff * 0.28;
             } else {
-                // Gentle, silky decay (0.88): fluid downward glide
-                self.bands[i] = (self.bands[i] * 0.88).max(0.0);
+                // Silky decay (0.92): fluid, relaxed downward glide
+                self.bands[i] = (self.bands[i] * 0.92).max(0.0);
             }
 
             if self.bands[i] < 0.01 {
@@ -181,10 +196,26 @@ impl VisualizerAnalyzer {
             }
         }
 
-        // 8. Spatial smoothing for liquid, hypnotic CAVA-style visualizer waves
+        // 8. Spatial smoothing: 5-tap Gaussian filter for liquid, hypnotic visualizer waves
         let mut smoothed = self.bands.clone();
-        for i in 1..num_bars - 1 {
-            smoothed[i] = 0.22 * self.bands[i - 1] + 0.56 * self.bands[i] + 0.22 * self.bands[i + 1];
+        if num_bars >= 5 {
+            for i in 2..num_bars - 2 {
+                smoothed[i] = 0.10 * self.bands[i - 2]
+                    + 0.25 * self.bands[i - 1]
+                    + 0.30 * self.bands[i]
+                    + 0.25 * self.bands[i + 1]
+                    + 0.10 * self.bands[i + 2];
+            }
+            if num_bars > 1 {
+                smoothed[1] = 0.25 * self.bands[0] + 0.50 * self.bands[1] + 0.25 * self.bands[2];
+                smoothed[num_bars - 2] = 0.25 * self.bands[num_bars - 3]
+                    + 0.50 * self.bands[num_bars - 2]
+                    + 0.25 * self.bands[num_bars - 1];
+            }
+        } else if num_bars >= 3 {
+            for i in 1..num_bars - 1 {
+                smoothed[i] = 0.25 * self.bands[i - 1] + 0.50 * self.bands[i] + 0.25 * self.bands[i + 1];
+            }
         }
         self.bands = smoothed;
     }

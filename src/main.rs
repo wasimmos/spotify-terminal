@@ -17,6 +17,16 @@ use app::App;
 use ui::render_ui;
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+        print_help();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--version" || a == "-v") {
+        println!("wasimmos (spotif) v0.1.0 - Minimalist Terminal Music Player");
+        return Ok(());
+    }
+
     // Panic hook to safely restore terminal on error
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -160,4 +170,42 @@ terminal.show_cursor()?;
 
     println!("👋 Thanks for using wasimmos player! Exited cleanly.");
     Ok(())
+}
+
+fn print_help() {
+    println!(r#"
+✦ wasimmos (spotif) - Minimalist Terminal Music Player with Spotify Integration
+
+USAGE:
+    spotif [OPTIONS]
+
+OPTIONS:
+    -h, --help       Show this help message and exit
+    -v, --version    Show version information and exit
+
+KEYBOARD CONTROLS:
+    Playback:
+        Space        Play / Pause current track
+        s            Stop playback
+        n            Skip to next track
+        p            Skip to previous track
+        + / =        Increase volume (+5%)
+        -            Decrease volume (-5%)
+
+    Interface & Views:
+        l, d         Toggle View Mode (Synced Lyrics ↔ Song Details)
+        Tab, P       Toggle Playlist Browser & Search
+        t, m         Cycle visual color theme (Disco Ice, Neon Sunset, etc.)
+        q, Esc       Quit player
+
+    Playlist Navigation (when playlist browser is open):
+        j / Down     Select next playlist
+        k / Up       Select previous playlist
+        Enter        Confirm and load selected playlist
+        /            Search / filter playlists
+        Esc          Close playlist browser
+
+    Mouse Controls:
+        Click Progress Bar   Seek directly to that position in the track
+"#);
 }
