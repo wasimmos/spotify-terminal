@@ -37,7 +37,7 @@ impl VisualizerAnalyzer {
             bands: vec![0.0; num_bars],
             peaks: vec![0.0; num_bars],
             peak_speeds: vec![0.0; num_bars],
-            gravity: 0.88, // Gravity falloff factor for organic decay
+            gravity: 0.85, // Smooth, organic CAVA falloff
         }
     }
 
@@ -73,31 +73,41 @@ impl VisualizerAnalyzer {
             return;
         }
 
-        // Check overall RMS energy
         let count = samples.len().min(self.fft_size);
+
+        // 1. Calculate DC mean to subtract hardware bias (PipeWire/hardware DAC often has -0.26 offset)
+        let mut sum = 0.0f32;
+        for i in 0..count {
+            sum += samples[i];
+        }
+        let dc_mean = sum / count as f32;
+
+        // 2. Check true AC energy (ignoring DC)
         let mut sum_sq = 0.0f32;
         for i in 0..count {
-            sum_sq += samples[i] * samples[i];
+            let ac = samples[i] - dc_mean;
+            sum_sq += ac * ac;
         }
-        let rms = (sum_sq / count as f32).sqrt();
-        if rms < 0.0008 {
-            // Signal is essentially silence
+        let ac_rms = (sum_sq / count as f32).sqrt();
+
+        // If true audio signal is silent or paused, decay cleanly
+        if ac_rms < 0.0015 {
             self.decay_bands();
             return;
         }
 
+        // 3. Prepare Hann-windowed buffer with DC bias removed
         let mut buffer: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); self.fft_size];
-
-        // Apply Hann window and copy samples
         for i in 0..count {
-            buffer[i] = Complex::new(samples[i] * self.window[i], 0.0);
+            let clean = samples[i] - dc_mean;
+            buffer[i] = Complex::new(clean * self.window[i], 0.0);
         }
 
-        // Run FFT
+        // 4. Run forward FFT
         let fft = self.planner.plan_fft_forward(self.fft_size);
         fft.process(&mut buffer);
 
-        // Calculate magnitude spectrum (positive frequencies only, 0 to fft_size/2)
+        // 5. Calculate magnitude spectrum (positive frequencies only, 0 to fft_size/2)
         let num_bins = self.fft_size / 2;
         let mut magnitudes: Vec<f32> = Vec::with_capacity(num_bins);
         for i in 0..num_bins {
@@ -105,9 +115,9 @@ impl VisualizerAnalyzer {
             magnitudes.push(mag);
         }
 
-        // Map FFT bins to logarithmic perceptual frequency bands (25 Hz - 16 kHz)
-        let min_freq = 25.0f32;
-        let max_freq = 16000.0f32;
+        // 6. Map FFT bins to logarithmic perceptual frequency bands (35 Hz - 14 kHz)
+        let min_freq = 35.0f32;
+        let max_freq = 14000.0f32;
         let nyquist = self.sample_rate as f32 / 2.0;
 
         let mut raw_bands = vec![0.0f32; num_bars];
@@ -119,37 +129,38 @@ impl VisualizerAnalyzer {
             let bin_low = ((f_low / nyquist) * num_bins as f32).floor() as usize;
             let bin_high = (((f_high / nyquist) * num_bins as f32).ceil() as usize).max(bin_low + 1);
 
-            let bin_low = bin_low.min(num_bins - 1);
-            let bin_high = bin_high.min(num_bins);
+            // CRITICAL: Bin 0 is DC offset (0 Hz). Always start from bin >= 1 to prevent bass ceiling pinning!
+            let bin_low = bin_low.max(1).min(num_bins - 1);
+            let bin_high = bin_high.max(bin_low + 1).min(num_bins);
 
-            let mut sum = 0.0;
-            let mut count = 0;
+            let mut bin_sum = 0.0f32;
+            let mut bin_count = 0;
             for &m in &magnitudes[bin_low..bin_high] {
-                sum += m;
-                count += 1;
+                bin_sum += m;
+                bin_count += 1;
             }
 
-            let avg = if count > 0 { sum / count as f32 } else { 0.0 };
+            let avg = if bin_count > 0 { bin_sum / bin_count as f32 } else { 0.0 };
 
-            // Apply perceptual frequency weighting (equal-loudness / treble boost)
-            let freq_boost = 1.2 + (bar_idx as f32 / num_bars as f32).powf(0.8) * 4.0;
-            // Dynamic range compression so small nuances register and loud hits peak cleanly
-            let val = (avg * freq_boost * 3.5).powf(0.68);
+            // Equal-loudness contour weighting (boost highs logarithmically)
+            let freq_boost = 1.0 + (bar_idx as f32 / num_bars as f32).powf(0.7) * 4.8;
+            // Dynamic logarithmic scaling
+            let val = (avg * freq_boost * 4.5).powf(0.72);
             *band = val.clamp(0.0, 1.0);
         }
 
-        // Smooth bands with organic gravity decay
+        // 7. Smooth bands: instant rise on audio beats, smooth gravity fall
         for i in 0..num_bars {
             let current = raw_bands[i];
             if current > self.bands[i] {
-                // Snappy response on audio transients
+                // Instant rise on transients
                 self.bands[i] = current;
             } else {
-                // Organic falloff
+                // Smooth decay
                 self.bands[i] = (self.bands[i] * self.gravity).max(0.0);
             }
 
-            // Peak indicators
+            // Peak markers
             if self.bands[i] >= self.peaks[i] {
                 self.peaks[i] = self.bands[i];
                 self.peak_speeds[i] = 0.005;
@@ -159,7 +170,7 @@ impl VisualizerAnalyzer {
             }
         }
 
-        // Neighbor smoothing for liquid CAVA-like wave contour
+        // 8. Neighbor smoothing for liquid CAVA-style visualizer waves
         let mut smoothed = self.bands.clone();
         for i in 1..num_bars - 1 {
             smoothed[i] = 0.20 * self.bands[i - 1] + 0.60 * self.bands[i] + 0.20 * self.bands[i + 1];
@@ -167,7 +178,7 @@ impl VisualizerAnalyzer {
         self.bands = smoothed;
     }
 
-    /// Generates procedural rhythmic audio visualization frames (standby mode fallback)
+    /// Generates procedural rhythmic audio visualization frames (demo fallback)
     pub fn update_procedural(&mut self, time: f32) {
         let num_bars = self.bands.len();
         if num_bars == 0 {

@@ -52,6 +52,7 @@ pub struct App {
 
     // Track change detection
     last_track_id: String,
+    pub album_area: Option<ratatui::layout::Rect>,
 }
 
 impl App {
@@ -123,6 +124,7 @@ impl App {
             last_tick: Instant::now(),
 
             last_track_id: String::new(),
+            album_area: None,
         }
     }
 
@@ -252,12 +254,14 @@ impl App {
     pub fn next_track(&mut self) {
         self.playback_time_ms = 0;
         self.last_track_id = String::new();
+        crate::ui::art::clear_kitty_images();
         self.spotify.next_track();
     }
 
     pub fn previous_track(&mut self) {
         self.playback_time_ms = 0;
         self.last_track_id = String::new();
+        crate::ui::art::clear_kitty_images();
         self.spotify.previous_track();
     }
 

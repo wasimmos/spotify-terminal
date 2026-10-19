@@ -435,6 +435,7 @@ fn handle_playback_json(
             tokio::spawn(async move {
                 if let Ok(resp) = reqwest::get(&url_clone).await {
                     if let Ok(bytes) = resp.bytes().await {
+                        let _ = std::fs::write("/home/insane/spotify-terminal/.current_cover.png", &bytes);
                         if let Ok(img) = image::load_from_memory(&bytes) {
                             let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
                         }
@@ -539,6 +540,7 @@ async fn fetch_recent_or_idle_track(
                                 tokio::spawn(async move {
                                     if let Ok(resp) = reqwest::get(&url_clone).await {
                                         if let Ok(bytes) = resp.bytes().await {
+                                            let _ = std::fs::write("/home/insane/spotify-terminal/.current_cover.png", &bytes);
                                             if let Ok(img) = image::load_from_memory(&bytes) {
                                                 let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
                                             }

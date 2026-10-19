@@ -73,8 +73,8 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     f.render_widget(card_block, card_area);
 
     if inner_card.width > 20 && inner_card.height > 6 {
-        // Compact Album Art Column: ~24 cols wide, keeping the icon smaller and elegant
-        let album_col_width: u16 = if inner_card.width > 90 { 24 } else { 20 };
+        // Prominent Album Art Column: ~26-30 cols wide (like reference image test.png)
+        let album_col_width: u16 = if inner_card.width > 100 { 30 } else if inner_card.width > 80 { 26 } else { 22 };
 
         let card_horiz = Layout::default()
             .direction(Direction::Horizontal)
@@ -87,14 +87,15 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         let left_album_pane = card_horiz[0];
         let right_content_pane = card_horiz[1];
 
-        // Left Pane: Smaller Album Art (centered, height ~8) + Bigger Controls below it
-        let art_height = (album_col_width / 2).clamp(7, 9).min(left_album_pane.height.saturating_sub(2));
+        // Left Pane: Album Art + Bigger Controls directly below
+        let max_art_h = left_album_pane.height.saturating_sub(4);
+        let art_height = (album_col_width / 2).clamp(9, 14).min(max_art_h);
 
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(art_height), // Smaller album icon
-                Constraint::Length(3),          // Prominent play/stop controls directly below
+                Constraint::Length(art_height), // Prominent album cover
+                Constraint::Length(3),          // Play/pause/skip controls directly below
                 Constraint::Min(0),             // Spacer
             ])
             .split(left_album_pane);
@@ -102,7 +103,10 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         let art_area = left_chunks[0];
         let sub_controls_area = left_chunks[1];
 
-        // Render Smaller Album Art
+        // Save album area for native Kitty Graphics Protocol placement
+        app.album_area = Some(art_area);
+
+        // Render Album Art
         f.render_widget(
             AlbumArtWidget::new(theme, app.album_cover.as_ref(), app.anim_time),
             art_area,

@@ -4,9 +4,66 @@ use ratatui::{
     style::{Color, Style},
     widgets::Widget,
 };
+use std::io::Write;
 
 use crate::ui::theme::ThemeMode;
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
+
+pub const COVER_CACHE_PATH: &str = "/home/insane/spotify-terminal/.current_cover.png";
+
+pub fn is_kitty_terminal() -> bool {
+    std::env::var("KITTY_WINDOW_ID").is_ok()
+        || std::env::var("TERM")
+            .map(|t| t.contains("kitty") || t.contains("ghostty"))
+            .unwrap_or(false)
+        || std::env::var("TERM_PROGRAM")
+            .map(|t| t == "ghostty" || t == "WezTerm")
+            .unwrap_or(false)
+}
+
+pub fn clear_kitty_images() {
+    if is_kitty_terminal() {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(b"\x1b_Ga=d,d=A\x1b\\");
+        let _ = stdout.flush();
+    }
+}
+
+pub fn render_kitty_art(area: Rect) {
+    if !is_kitty_terminal() {
+        return;
+    }
+    if !std::path::Path::new(COVER_CACHE_PATH).exists() {
+        return;
+    }
+
+    let square_cols = area.width.min(area.height * 2) & !1;
+    let square_rows = square_cols / 2;
+    if square_cols == 0 || square_rows == 0 {
+        return;
+    }
+
+    let offset_x = area.x + (area.width.saturating_sub(square_cols)) / 2;
+    let offset_y = area.y + (area.height.saturating_sub(square_rows)) / 2;
+
+    let b64 = base64_encode(COVER_CACHE_PATH.as_bytes());
+
+    // Position cursor at exact cell coordinates (1-based row and col)
+    // Send Kitty graphics command: a=T (transmit/display), f=100 (png), t=f (file path),
+    // c=columns, r=rows, C=1 (don't move cursor), z=1 (render above buffer)
+    let seq = format!(
+        "\x1b[{};{}H\x1b_Ga=T,f=100,t=f,c={},r={},C=1,z=1;{}\x1b\\",
+        offset_y + 1,
+        offset_x + 1,
+        square_cols,
+        square_rows,
+        b64
+    );
+
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(seq.as_bytes());
+    let _ = stdout.flush();
+}
 
 pub struct AlbumArtWidget<'a> {
     theme: ThemeMode,
@@ -26,13 +83,8 @@ impl<'a> Widget for AlbumArtWidget<'a> {
             return;
         }
 
-        // Terminal text cell geometry:
-        // A character cell has roughly a 1:2 width:height ratio (e.g. 9px wide x 18px tall).
-        // Each cell contains two half-blocks ('▀'), making each half-block ~9px x 9px (square).
-        // Therefore, for a 1:1 square image:
-        // number of horizontal columns (cells) = number of vertical half-blocks (rows * 2).
         let max_cols_from_height = area.height.saturating_mul(2);
-        let square_cols = area.width.min(max_cols_from_height) & !1; // Ensure even
+        let square_cols = area.width.min(max_cols_from_height) & !1;
         let square_rows = square_cols / 2;
 
         if square_cols == 0 || square_rows == 0 {
@@ -40,14 +92,13 @@ impl<'a> Widget for AlbumArtWidget<'a> {
         }
 
         let pixel_width = square_cols as u32;
-        let pixel_height = (square_rows * 2) as u32; // pixel_width == pixel_height -> perfect 1:1 square!
+        let pixel_height = (square_rows * 2) as u32;
 
-        // Center the square album art cleanly inside the allotted area
         let offset_x = area.x + (area.width.saturating_sub(square_cols)) / 2;
         let offset_y = area.y + (area.height.saturating_sub(square_rows)) / 2;
 
         if let Some(img) = self.image {
-            // High-quality Lanczos3 downsampling preserves sharp edges and fine details
+            // High-resolution Lanczos3 downsampling
             let resized = img.resize_exact(pixel_width, pixel_height, FilterType::Lanczos3);
 
             for y_cell in 0..square_rows {
@@ -62,7 +113,6 @@ impl<'a> Widget for AlbumArtWidget<'a> {
                         top_pixel
                     };
 
-                    // Slight contrast boost to make terminal colors punchy and clear
                     let top_color = Color::Rgb(
                         boost_color(top_pixel[0]),
                         boost_color(top_pixel[1]),
@@ -85,7 +135,7 @@ impl<'a> Widget for AlbumArtWidget<'a> {
                 }
             }
         } else {
-            // Procedural synthwave cover fallback (also 1:1 square!)
+            // Procedural synthwave cover fallback
             for y_cell in 0..square_rows {
                 for x in 0..square_cols {
                     let top_y = (y_cell * 2) as f32;
@@ -122,11 +172,9 @@ impl<'a> Widget for AlbumArtWidget<'a> {
     }
 }
 
-/// Gentle contrast & vibrancy curve for terminal display
 #[inline]
 fn boost_color(c: u8) -> u8 {
     let f = c as f32 / 255.0;
-    // S-curve for contrast: shadows deepen slightly, highlights stay clear
     let s = if f < 0.5 {
         2.0 * f * f
     } else {
@@ -170,4 +218,30 @@ fn procedural_art_color(
             theme.card_border()
         }
     }
+}
+
+pub fn base64_encode(input: &[u8]) -> String {
+    const SET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i] as u32;
+        let b1 = if i + 1 < input.len() { input[i + 1] as u32 } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(SET[((triple >> 18) & 63) as usize] as char);
+        out.push(SET[((triple >> 12) & 63) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(SET[((triple >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if i + 2 < input.len() {
+            out.push(SET[(triple & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        i += 3;
+    }
+    out
 }
