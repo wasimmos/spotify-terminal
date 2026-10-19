@@ -31,10 +31,24 @@ impl<'a> LyricsWidget<'a> {
 impl<'a> Widget for LyricsWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width < 10 || area.height < 2 || self.lyrics.is_empty() {
-            let msg = "♪ Instrumental / No Synced Lyrics ♪";
-            let x = area.x + (area.width.saturating_sub(msg.len() as u16)) / 2;
-            let y = area.y + area.height / 2;
-            buf.set_string(x, y, msg, Style::default().fg(Color::DarkGray));
+            let lines = [
+                "♪  No Synced Lyrics Available  ♪",
+                "Play a track on Spotify to get started",
+            ];
+            let center_y = area.y + area.height / 2;
+            for (i, msg) in lines.iter().enumerate() {
+                let y = center_y.saturating_add(i as u16);
+                if y >= area.bottom() {
+                    break;
+                }
+                let x = area.x + (area.width.saturating_sub(msg.len() as u16)) / 2;
+                let style = if i == 0 {
+                    Style::default().fg(self.theme.title_color()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Rgb(90, 90, 110))
+                };
+                buf.set_string(x, y, msg, style);
+            }
             return;
         }
 

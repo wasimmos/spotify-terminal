@@ -1,5 +1,4 @@
 use image::DynamicImage;
-use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -49,6 +48,9 @@ pub struct App {
     pub anim_time: f32,
     pub should_quit: bool,
     last_tick: Instant,
+
+    // Track change detection
+    last_track_id: String,
 }
 
 impl App {
@@ -60,62 +62,42 @@ impl App {
         let (spotify_tx, spotify_rx) = channel::<SpotifyEvent>();
         let spotify = SpotifyManager::spawn(spotify_tx);
 
-        // Load reference album art if available
-        let cover_path = Path::new("/home/insane/spotify-terminal/example/cover.png");
-        let album_cover = if cover_path.exists() {
-            image::open(cover_path).ok()
-        } else {
-            None
-        };
+        // Start with NO album cover — procedural synthwave fallback renders until real art arrives
+        let album_cover: Option<DynamicImage> = None;
 
+        // Empty playlists — will be loaded from Spotify on connect
         let playlists = vec![
             "Bollywood Soul & Ghazals".to_string(),
             "Late Night Acoustic & Lo-Fi".to_string(),
             "Cyberpunk 2077 Synthwave".to_string(),
             "Top 50 Global Favorites".to_string(),
             "Coding Flow & Deep Focus".to_string(),
-            "♥ Liked Songs (420)".to_string(),
+            "♥ Liked Songs".to_string(),
         ];
 
-        let lyrics = vec![
-            LyricLine { time_ms: 0, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
-            LyricLine { time_ms: 12_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
-            LyricLine { time_ms: 24_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
-            LyricLine { time_ms: 36_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
-            LyricLine { time_ms: 42_000, text: "आँखें तेरी ...".to_string() },
-            LyricLine { time_ms: 48_000, text: "आँखें तेरी कितनी हसीं".to_string() },
-            LyricLine { time_ms: 55_000, text: "के इनका आशिक़ मैं बन गया हूँ".to_string() },
-            LyricLine { time_ms: 63_000, text: "मुझको बसा ले इनमें तू".to_string() },
-            LyricLine { time_ms: 72_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे (इश्क़ है)".to_string() },
-            LyricLine { time_ms: 84_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे (इश्क़ है)".to_string() },
-            LyricLine { time_ms: 96_000, text: "मौला मेरे, मौला मेरे, मौला मेरे, मौला मेरे".to_string() },
-        ];
+        // Empty lyrics — will show "No Synced Lyrics" until track data arrives
+        let lyrics = vec![];
 
         let track_details = TrackDetails {
-            album: "Anwar (Original Soundtrack)".to_string(),
-            artist: "Roop Kumar Rathod, Mithoon".to_string(),
-            release_year: "2007".to_string(),
-            genre: "Sufi Fusion / Acoustic".to_string(),
+            album: "—".to_string(),
+            artist: "—".to_string(),
+            release_year: "—".to_string(),
+            genre: "—".to_string(),
             format: "Spotify Web Stream".to_string(),
             bitrate: "Ogg Vorbis 320 kbps".to_string(),
-            tempo: "86 BPM".to_string(),
-            key_signature: "D Minor".to_string(),
-            up_next: vec![
-                ("Javeda Zindagi (Tose Naina)".to_string(), "Kshitij Tarey, Anwar".to_string(), "05:14".to_string()),
-                ("Tere Bina".to_string(), "A.R. Rahman, Chinmayi".to_string(), "05:08".to_string()),
-                ("Tu Jaane Na".to_string(), "Atif Aslam, Ajab Prem".to_string(), "05:37".to_string()),
-                ("Kun Faya Kun".to_string(), "A.R. Rahman, Rockstar".to_string(), "07:53".to_string()),
-            ],
+            tempo: "—".to_string(),
+            key_signature: "—".to_string(),
+            up_next: vec![],
         };
 
         Self {
-            current_track: "Maula Mere Maula".to_string(),
-            current_artist: "Roop Kumar Rathod • Anwar".to_string(),
-            current_album: "Anwar (2007)".to_string(),
-            duration: Duration::from_secs(364),
-            is_playing: true,
+            current_track: "No track playing".to_string(),
+            current_artist: "Connect to Spotify to start".to_string(),
+            current_album: "—".to_string(),
+            duration: Duration::from_secs(0),
+            is_playing: false,
             volume: 0.85,
-            playback_time_ms: 42_000,
+            playback_time_ms: 0,
 
             album_cover,
             theme: ThemeMode::DiscoIce,
@@ -123,7 +105,7 @@ impl App {
 
             spotify,
             spotify_rx,
-            spotify_status: "Demo / Standby".to_string(),
+            spotify_status: "Connecting…".to_string(),
 
             show_playlists: false,
             is_searching: false,
@@ -139,6 +121,8 @@ impl App {
             anim_time: 0.0,
             should_quit: false,
             last_tick: Instant::now(),
+
+            last_track_id: String::new(),
         }
     }
 
@@ -167,7 +151,7 @@ impl App {
 
         self.anim_time += dt;
 
-        // Drain background Spotify events
+        // Drain ALL pending Spotify events this tick
         while let Ok(event) = self.spotify_rx.try_recv() {
             match event {
                 SpotifyEvent::Connected(msg) => {
@@ -176,14 +160,46 @@ impl App {
                 }
                 SpotifyEvent::Disconnected(msg) => {
                     self.spotify_status = msg;
+                    self.is_playing = false;
                 }
                 SpotifyEvent::PlaybackUpdate(state) => {
+                    // Detect track change — reset art + lyrics when song switches
+                    let new_track_id = format!("{}::{}", state.track_name, state.artist_name);
+                    if new_track_id != self.last_track_id {
+                        self.last_track_id = new_track_id;
+
+                        // Clear stale album cover so new one downloads
+                        // (AlbumArtLoaded event will replace it with real art)
+                        self.album_cover = None;
+
+                        // Clear lyrics — Spotify free API doesn't provide synced lyrics.
+                        // Show the empty-state message instead.
+                        self.lyrics = vec![];
+
+                        // Reset track details placeholders
+                        self.track_details.release_year = "—".to_string();
+                        self.track_details.genre = "—".to_string();
+                        self.track_details.tempo = "—".to_string();
+                        self.track_details.key_signature = "—".to_string();
+                        self.track_details.up_next = vec![];
+                    }
+
+                    // Update live playback state
                     self.current_track = state.track_name;
                     self.current_artist = state.artist_name;
                     self.current_album = state.album_name.clone();
+
+                    // Update details panel
                     self.track_details.album = state.album_name;
                     self.track_details.artist = self.current_artist.clone();
-                    self.playback_time_ms = state.progress_ms;
+                    self.track_details.format = "Spotify Web Stream".to_string();
+                    self.track_details.bitrate = "Ogg Vorbis 320 kbps".to_string();
+
+                    // Only update progress from Spotify if it's actually playing
+                    // (avoids overwrite when a recently-played idle track is fetched)
+                    if state.is_playing || self.playback_time_ms == 0 {
+                        self.playback_time_ms = state.progress_ms;
+                    }
                     self.duration = Duration::from_millis(state.duration_ms);
                     self.is_playing = state.is_playing;
                 }
@@ -198,10 +214,13 @@ impl App {
             }
         }
 
+        // Advance local playback clock between Spotify polls
         if self.is_playing {
             self.playback_time_ms += (dt * 1000.0) as u64;
-            if self.playback_time_ms > self.duration.as_millis() as u64 {
-                self.playback_time_ms = 0;
+            if self.duration.as_millis() > 0
+                && self.playback_time_ms > self.duration.as_millis() as u64
+            {
+                self.playback_time_ms = self.duration.as_millis() as u64;
             }
 
             self.visualizer.update_procedural(self.anim_time);
@@ -221,11 +240,15 @@ impl App {
 
     pub fn next_track(&mut self) {
         self.playback_time_ms = 0;
+        // Force track change detection on next poll
+        self.last_track_id = String::new();
         self.spotify.next_track();
     }
 
     pub fn previous_track(&mut self) {
         self.playback_time_ms = 0;
+        // Force track change detection on next poll
+        self.last_track_id = String::new();
         self.spotify.previous_track();
     }
 

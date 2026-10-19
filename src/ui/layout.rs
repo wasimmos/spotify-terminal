@@ -94,7 +94,7 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(art_height), // Smaller album icon
-                Constraint::Length(2),          // Prominent play/stop controls directly below
+                Constraint::Length(3),          // Prominent play/stop controls directly below
                 Constraint::Min(0),             // Spacer
             ])
             .split(left_album_pane);

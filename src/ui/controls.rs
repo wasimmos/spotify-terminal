@@ -20,52 +20,75 @@ impl Widget for AlbumSubControlsWidget {
             return;
         }
 
-        let play_btn = if self.is_playing { " ⏸ " } else { " ▶ " };
+        let play_icon = if self.is_playing { "⏸" } else { "▶" };
 
-        // Styled button segments
-        let prev_btn = " ⏮ ";
-        let stop_btn = " ⏹ ";
-        let next_btn = " ⏭ ";
+        // Each button: padding + icon + padding
+        // Layout: [⏮] [▶] [⏭]  (stop removed — space is play/pause)
+        struct Btn<'a> {
+            icon: &'a str,
+            is_accent: bool,
+        }
 
-        let full_text = format!("{} {} {} {}", prev_btn, play_btn, stop_btn, next_btn);
-        let len = full_text.chars().count() as u16;
-        let x = area.x + (area.width.saturating_sub(len)) / 2;
+        let buttons = [
+            Btn { icon: "⏮", is_accent: false },
+            Btn { icon: play_icon, is_accent: true },
+            Btn { icon: "⏭", is_accent: false },
+        ];
+
+        let accent_bg = self.theme.title_color();
+        let accent_fg = Color::Rgb(15, 12, 25);
+        let normal_bg = Color::Rgb(38, 34, 52);
+        let normal_fg = Color::Rgb(200, 200, 220);
+
+        // Calculate total width for centering
+        // Each button is " icon " (3 chars) + 1 separator gap, except last
+        let btn_width: u16 = 5; // " X " with padding
+        let total_w = btn_width * buttons.len() as u16 + (buttons.len() as u16 - 1);
+        let start_x = area.x + area.width.saturating_sub(total_w) / 2;
         let y = area.y;
 
-        // Render with high-contrast accent styling
-        let active_play_style = if self.is_playing {
-            Style::default()
-                .fg(Color::Rgb(20, 20, 30))
-                .bg(self.theme.title_color())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(self.theme.title_color())
-                .bg(Color::Rgb(40, 35, 55))
-                .add_modifier(Modifier::BOLD)
-        };
+        let mut cx = start_x;
+        for (i, btn) in buttons.iter().enumerate() {
+            let (fg, bg) = if btn.is_accent {
+                (accent_fg, accent_bg)
+            } else {
+                (normal_fg, normal_bg)
+            };
 
-        let normal_style = Style::default()
-            .fg(Color::Rgb(220, 220, 235))
-            .bg(Color::Rgb(30, 28, 42))
-            .add_modifier(Modifier::BOLD);
+            let style = Style::default()
+                .fg(fg)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD);
 
-        let mut cur_x = x;
+            // Render " icon " (padded)
+            let label = format!(" {} ", btn.icon);
+            buf.set_string(cx, y, &label, style);
+            cx += label.chars().count() as u16;
 
-        // ⏮ Prev
-        buf.set_string(cur_x, y, prev_btn, normal_style);
-        cur_x += prev_btn.chars().count() as u16 + 1;
+            // Separator between buttons (not after last)
+            if i < buttons.len() - 1 {
+                buf.set_string(
+                    cx,
+                    y,
+                    "│",
+                    Style::default().fg(Color::Rgb(60, 55, 80)),
+                );
+                cx += 1;
+            }
+        }
 
-        // ▶ / ⏸ Play
-        buf.set_string(cur_x, y, play_btn, active_play_style);
-        cur_x += play_btn.chars().count() as u16 + 1;
-
-        // ⏹ Stop
-        buf.set_string(cur_x, y, stop_btn, normal_style);
-        cur_x += stop_btn.chars().count() as u16 + 1;
-
-        // ⏭ Next
-        buf.set_string(cur_x, y, next_btn, normal_style);
+        // Second row: volume indicator (if height allows)
+        if area.height >= 2 {
+            let vol_pct = 85u8; // TODO: wire to app.volume when controls get click support
+            let vol_str = format!("🔊 {}%", vol_pct);
+            let vx = area.x + area.width.saturating_sub(vol_str.chars().count() as u16) / 2;
+            buf.set_string(
+                vx,
+                area.y + 1,
+                &vol_str,
+                Style::default().fg(Color::Rgb(110, 110, 130)),
+            );
+        }
     }
 }
 
