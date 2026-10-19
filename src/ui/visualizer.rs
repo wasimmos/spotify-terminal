@@ -8,7 +8,17 @@ use ratatui::{
 use crate::audio::VisualizerAnalyzer;
 use crate::ui::theme::ThemeMode;
 
-const SUB_BLOCKS: [char; 9] = [' ', ' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const SUB_BLOCKS: [char; 9] = [
+    ' ',
+    '\u{2581}', // ' ' Lower 1/8
+    '\u{2582}', // '▂' Lower 1/4
+    '\u{2583}', // '▃' Lower 3/8
+    '\u{2584}', // '▄' Lower 1/2
+    '\u{2585}', // '▅' Lower 5/8
+    '\u{2586}', // '▆' Lower 3/4
+    '\u{2587}', // '▇' Lower 7/8
+    '\u{2588}', // '█' Full block
+];
 
 pub struct VisualizerWidget<'a> {
     analyzer: &'a VisualizerAnalyzer,
@@ -27,18 +37,16 @@ impl<'a> Widget for VisualizerWidget<'a> {
             return;
         }
 
-        // Larger, chunky bars with breathing room
-        let bar_width: u16 = if area.width > 130 {
-            5
-        } else if area.width > 90 {
-            4
-        } else {
+        // Classic CAVA proportions: 2 chars wide with 1 char gap
+        let bar_width: u16 = if area.width > 160 {
             3
+        } else {
+            2
         };
-        let gap_width: u16 = if bar_width >= 4 { 2 } else { 1 };
+        let gap_width: u16 = 1;
         let slot_width = bar_width + gap_width;
 
-        let num_bars = ((area.width + gap_width) / slot_width).saturating_sub(2).max(12) as usize;
+        let num_bars = ((area.width + gap_width) / slot_width).max(8) as usize;
         if num_bars == 0 {
             return;
         }

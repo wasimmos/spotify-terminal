@@ -174,18 +174,16 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     );
 
     // ==========================================
-    // 4. BOTTOM CAVA VISUALIZER (Large, wide bars with breathing room)
+    // 4. BOTTOM CAVA VISUALIZER (Classic CAVA proportions: 2 chars wide, 1 gap)
     // ==========================================
-    let bar_width: u16 = if visualizer_area.width > 130 {
-        5
-    } else if visualizer_area.width > 90 {
-        4
-    } else {
+    let bar_width: u16 = if visualizer_area.width > 160 {
         3
+    } else {
+        2
     };
-    let gap_width: u16 = if bar_width >= 4 { 2 } else { 1 };
+    let gap_width: u16 = 1;
     let slot_width = bar_width + gap_width;
-    let num_bars = ((visualizer_area.width + gap_width) / slot_width).saturating_sub(2).max(12) as usize;
+    let num_bars = ((visualizer_area.width + gap_width) / slot_width).max(8) as usize;
     app.visualizer.resize_bars(num_bars);
 
     f.render_widget(

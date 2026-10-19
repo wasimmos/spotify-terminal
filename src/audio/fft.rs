@@ -72,6 +72,13 @@ impl VisualizerAnalyzer {
         }
     }
 
+    pub fn set_bands(&mut self, new_bands: &[f32]) {
+        if self.bands.len() != new_bands.len() {
+            self.resize_bars(new_bands.len());
+        }
+        self.bands.copy_from_slice(new_bands);
+    }
+
     /// Process PCM audio samples and update frequency bands
     pub fn process_samples(&mut self, samples: &[f32]) {
         let num_bars = self.bands.len();
@@ -122,6 +129,9 @@ impl VisualizerAnalyzer {
             magnitudes.push(mag);
         }
 
+        // Dynamic AGC boost for full screen dynamic range
+        let agc_gain = (0.30 / ac_rms.max(0.03)).clamp(1.2, 9.0);
+
         // 6. Map FFT bins to logarithmic perceptual frequency bands (35 Hz - 14 kHz)
         let min_freq = 35.0f32;
         let max_freq = 14000.0f32;
@@ -136,7 +146,6 @@ impl VisualizerAnalyzer {
             let bin_low = ((f_low / nyquist) * num_bins as f32).floor() as usize;
             let bin_high = (((f_high / nyquist) * num_bins as f32).ceil() as usize).max(bin_low + 1);
 
-            // CRITICAL: Bin 0 is DC offset (0 Hz). Always start from bin >= 1 to prevent bass ceiling pinning!
             let bin_low = bin_low.max(1).min(num_bins - 1);
             let bin_high = bin_high.max(bin_low + 1).min(num_bins);
 
@@ -151,73 +160,43 @@ impl VisualizerAnalyzer {
 
             // Equal-loudness contour weighting (boost highs smoothly)
             let freq_boost = 1.0 + (bar_idx as f32 / num_bars as f32).powf(0.75) * 3.6;
-            // Acoustic loudness compression using sqrt
-            let val = (avg * freq_boost * 3.8).sqrt();
+            let val = (avg * freq_boost * agc_gain * 2.5).sqrt();
             *band = val.clamp(0.0, 1.0);
         }
 
-        // Temporal low-pass filter on raw targets: removes single-frame jumping and high-frequency buzzing
-        for i in 0..num_bars {
-            if i < self.prev_raw.len() {
-                self.prev_raw[i] = self.prev_raw[i] * 0.55 + raw_bands[i] * 0.45;
-                raw_bands[i] = self.prev_raw[i];
+        // CAVA Monstercat spatial filter (spreads peaks into neighboring bars organically)
+        let monstercat = 1.4f32;
+        for z in 0..num_bars {
+            for m_y in (0..z).rev() {
+                let de = (z - m_y) as f32;
+                raw_bands[m_y] = raw_bands[m_y].max(raw_bands[z] / (monstercat * 1.5).powf(de));
+            }
+            for m_y in (z + 1)..num_bars {
+                let de = (m_y - z) as f32;
+                raw_bands[m_y] = raw_bands[m_y].max(raw_bands[z] / (monstercat * 1.5).powf(de));
             }
         }
 
-        // 7. Temporal envelope: gentle attack + silky decay (no jitter / eye strain)
+        // Responsive attack with physics-based gravity falloff
         for i in 0..num_bars {
             let target = raw_bands[i];
-            let diff = target - self.bands[i];
-
-            // Micro-deadband: ignore tiny noise jitter (< 2.5%) to prevent resting buzz
-            if diff.abs() < 0.025 {
-                continue;
-            }
-
-            if diff > 0.0 {
-                // Gentle attack (0.28): bars swell organically with rhythm without harsh vibration
-                self.bands[i] += diff * 0.28;
+            if target > self.bands[i] {
+                // Snappy attack: jump up with beats
+                self.bands[i] += (target - self.bands[i]) * 0.72;
+                self.peaks[i] = self.bands[i];
+                self.peak_speeds[i] = 0.0;
             } else {
-                // Silky decay (0.92): fluid, relaxed downward glide
-                self.bands[i] = (self.bands[i] * 0.92).max(0.0);
+                // CAVA gravity falloff
+                self.peak_speeds[i] += 0.032;
+                let fall = self.peak_speeds[i];
+                let falloff = self.peaks[i] * (1.0 - fall * fall * 1.6);
+                self.bands[i] = falloff.max(0.0);
             }
 
             if self.bands[i] < 0.01 {
                 self.bands[i] = 0.0;
             }
-
-            // Smooth peak markers
-            if self.bands[i] >= self.peaks[i] {
-                self.peaks[i] = self.bands[i];
-                self.peak_speeds[i] = 0.003;
-            } else {
-                self.peak_speeds[i] += 0.002;
-                self.peaks[i] = (self.peaks[i] - self.peak_speeds[i]).max(0.0);
-            }
         }
-
-        // 8. Spatial smoothing: 5-tap Gaussian filter for liquid, hypnotic visualizer waves
-        let mut smoothed = self.bands.clone();
-        if num_bars >= 5 {
-            for i in 2..num_bars - 2 {
-                smoothed[i] = 0.10 * self.bands[i - 2]
-                    + 0.25 * self.bands[i - 1]
-                    + 0.30 * self.bands[i]
-                    + 0.25 * self.bands[i + 1]
-                    + 0.10 * self.bands[i + 2];
-            }
-            if num_bars > 1 {
-                smoothed[1] = 0.25 * self.bands[0] + 0.50 * self.bands[1] + 0.25 * self.bands[2];
-                smoothed[num_bars - 2] = 0.25 * self.bands[num_bars - 3]
-                    + 0.50 * self.bands[num_bars - 2]
-                    + 0.25 * self.bands[num_bars - 1];
-            }
-        } else if num_bars >= 3 {
-            for i in 1..num_bars - 1 {
-                smoothed[i] = 0.25 * self.bands[i - 1] + 0.50 * self.bands[i] + 0.25 * self.bands[i + 1];
-            }
-        }
-        self.bands = smoothed;
     }
 
     /// Generates procedural rhythmic audio visualization frames (demo fallback)

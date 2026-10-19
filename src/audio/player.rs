@@ -68,36 +68,34 @@ fn capture_loop(
     is_active: Arc<AtomicBool>,
     child_slot: Arc<Mutex<Option<Child>>>,
 ) {
-    // 1. Try pw-record (PipeWire native audio loopback monitor)
-    let pw_cmd = Command::new("pw-record")
+    // 1. Try parec (PulseAudio/PipeWire monitor) - reliably captures active speaker loopback
+    let parec_cmd = Command::new("parec")
         .args([
-            "--target",
-            "@DEFAULT_MONITOR@",
-            "--format",
-            "f32",
-            "--rate",
-            "44100",
-            "--channels",
-            "2",
+            "--format=float32le",
+            "--rate=44100",
+            "--channels=2",
             "--raw",
-            "-",
+            "-d",
+            "@DEFAULT_MONITOR@",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn();
 
-    let mut maybe_child = match pw_cmd {
+    let mut maybe_child = match parec_cmd {
         Ok(c) => Some(c),
         Err(_) => {
-            // 2. Fallback: parec (PulseAudio monitor)
-            Command::new("parec")
+            // 2. Fallback: pw-record
+            Command::new("pw-record")
                 .args([
-                    "--format=float32le",
-                    "--rate=44100",
-                    "--channels=2",
+                    "--format",
+                    "f32",
+                    "--rate",
+                    "44100",
+                    "--channels",
+                    "2",
                     "--raw",
-                    "-d",
-                    "@DEFAULT_MONITOR@",
+                    "-",
                 ])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())

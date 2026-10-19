@@ -3,7 +3,7 @@ use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::audio::{AudioEngine, VisualizerAnalyzer};
+use crate::audio::{AudioEngine, CavaStream, VisualizerAnalyzer};
 use crate::spotify::{SpotifyEvent, SpotifyManager};
 use crate::ui::details::TrackDetails;
 use crate::ui::lyrics::LyricLine;
@@ -46,6 +46,7 @@ pub struct App {
     pub lyrics: Vec<LyricLine>,
     pub track_details: TrackDetails,
     pub visualizer: VisualizerAnalyzer,
+    pub cava_stream: Option<CavaStream>,
     pub audio_engine: AudioEngine,
     pub audio_buffer: Vec<f32>,
 
@@ -64,6 +65,7 @@ pub struct App {
 impl App {
     pub fn new(picker: Picker) -> Self {
         let audio_engine = AudioEngine::new();
+        let cava_stream = CavaStream::new();
         let visualizer = VisualizerAnalyzer::new(32, 44100);
 
         // Spotify background manager channel
@@ -130,6 +132,7 @@ impl App {
             lyrics,
             track_details,
             visualizer,
+            cava_stream,
             audio_engine,
             audio_buffer: vec![0.0; 1024],
 
@@ -239,20 +242,32 @@ impl App {
             }
         }
 
-        // Real audio visualizer analysis (captured live from default speaker output)
-        let mut new_samples = Vec::new();
-        self.audio_engine.read_samples(&mut new_samples);
-
-        if !new_samples.is_empty() {
-            self.audio_buffer.extend(new_samples);
-            if self.audio_buffer.len() > 1024 {
-                let overflow = self.audio_buffer.len() - 1024;
-                self.audio_buffer.drain(0..overflow);
+        // Visualizer analysis:
+        // Priority 1: Native CAVA stream (100% genuine CAVA with Monstercat & PipeWire sync)
+        let mut cava_applied = false;
+        if let Some(ref cava) = self.cava_stream {
+            if let Some(bars) = cava.get_interpolated_bars(self.visualizer.bands.len()) {
+                self.visualizer.set_bands(&bars);
+                cava_applied = true;
             }
-            self.visualizer.process_samples(&self.audio_buffer);
-        } else {
-            // Decay bars smoothly towards zero when silent/paused
-            self.visualizer.decay_bands();
+        }
+
+        // Priority 2: High-fidelity built-in FFT fallback (if CAVA is unavailable)
+        if !cava_applied {
+            let mut new_samples = Vec::new();
+            self.audio_engine.read_samples(&mut new_samples);
+
+            if !new_samples.is_empty() {
+                self.audio_buffer.extend(new_samples);
+                if self.audio_buffer.len() > 1024 {
+                    let overflow = self.audio_buffer.len() - 1024;
+                    self.audio_buffer.drain(0..overflow);
+                }
+                self.visualizer.process_samples(&self.audio_buffer);
+            } else {
+                // Decay bars smoothly towards zero when silent/paused
+                self.visualizer.decay_bands();
+            }
         }
     }
 
