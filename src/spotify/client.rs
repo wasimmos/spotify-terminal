@@ -1,7 +1,6 @@
 use futures::StreamExt;
 use image::DynamicImage;
 use rspotify::{
-    model::{AdditionalType, PlayableItem},
     prelude::*,
     scopes, AuthCodePkceSpotify, Config, Credentials, OAuth,
 };
@@ -242,7 +241,7 @@ impl SpotifyManager {
                         Some(cmd) = cmd_rx.recv() => {
                             match cmd {
                                 SpotifyCommand::TogglePlay => {
-                                    match spotify.current_playback(None, None::<&[AdditionalType]>).await {
+                                    match spotify.current_playback(None, None::<&[rspotify::model::AdditionalType]>).await {
                                         Ok(Some(p)) => {
                                             if p.is_playing {
                                                 let _ = spotify.pause_playback(None).await;
@@ -308,78 +307,152 @@ impl SpotifyManager {
     }
 }
 
-/// Core polling function — extracted to be callable from both the interval tick
-/// and immediately after next/prev track commands.
+/// Core polling function using raw HTTP to bypass rspotify's brittle JSON
+/// deserialization (which fails on podcasts, local files, etc.)
 async fn poll_playback(
     spotify: &AuthCodePkceSpotify,
     event_sender: &Sender<SpotifyEvent>,
     last_art_url: &mut Option<String>,
     error_count: &mut u32,
 ) {
-    match spotify.current_playback(None, None::<&[AdditionalType]>).await {
-        Ok(Some(playback)) => {
+    // Get a fresh access token from rspotify's token store
+    let access_token = {
+        match spotify.get_token().lock().await {
+            Ok(guard) => guard.as_ref().map(|t| t.access_token.clone()),
+            Err(_) => None,
+        }
+    };
+
+    let token = match access_token {
+        Some(t) => t,
+        None => return,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.spotify.com/v1/me/player")
+        .bearer_auth(&token)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().as_u16() == 204 => {
+            // 204 = no active playback — that's fine, keep current display
+        }
+        Ok(r) if r.status().is_success() => {
             *error_count = 0;
-
-            if let Some(item) = playback.item {
-                if let PlayableItem::Track(full_track) = item {
-                    let artists = full_track
-                        .artists
-                        .iter()
-                        .map(|a| a.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-
-                    let art_url = full_track.album.images.first().map(|img| img.url.clone());
-                    let progress_ms = playback
-                        .progress
-                        .map(|d| d.num_milliseconds().max(0) as u64)
-                        .unwrap_or(0);
-                    let duration_ms = full_track.duration.num_milliseconds().max(0) as u64;
-
-                    // Download album art in a spawned task so it doesn't block polling
-                    if art_url != *last_art_url {
-                        *last_art_url = art_url.clone();
-                        if let Some(ref url) = art_url {
-                            let url_clone = url.clone();
-                            let sender_clone = event_sender.clone();
-                            tokio::spawn(async move {
-                                if let Ok(resp) = reqwest::get(&url_clone).await {
-                                    if let Ok(bytes) = resp.bytes().await {
-                                        if let Ok(img) = image::load_from_memory(&bytes) {
-                                            let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    }
-
-                    let _ = event_sender.send(SpotifyEvent::PlaybackUpdate(SpotifyPlaybackState {
-                        track_name: full_track.name,
-                        artist_name: artists,
-                        album_name: full_track.album.name,
-                        album_art_url: art_url,
-                        progress_ms,
-                        duration_ms,
-                        is_playing: playback.is_playing,
-                    }));
+            if let Ok(text) = r.text().await {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                    handle_playback_json(val, event_sender, last_art_url);
                 }
             }
         }
-        Ok(None) => {
-            // Nothing currently playing — that's fine, stay on current display
+        Ok(r) if r.status().as_u16() == 401 => {
+            *error_count += 1;
+            if *error_count >= 2 {
+                let _ = event_sender.send(SpotifyEvent::Disconnected(
+                    "🔄 Token expired — restart to re-auth".to_string()
+                ));
+            }
+        }
+        Ok(r) => {
+            *error_count += 1;
+            if *error_count >= 3 {
+                let _ = event_sender.send(SpotifyEvent::Disconnected(
+                    format!("⚠ Spotify: HTTP {}", r.status().as_u16())
+                ));
+            }
         }
         Err(e) => {
             *error_count += 1;
-            // Only show error after a few consecutive failures to avoid flicker
             if *error_count >= 3 {
                 let _ = event_sender.send(SpotifyEvent::Disconnected(
-                    format!("⚠ API error: {}", e)
+                    format!("⚠ Network: {}", e)
                 ));
             }
         }
     }
 }
+
+/// Parse raw JSON from GET /me/player — works for tracks, podcasts, local files, anything.
+fn handle_playback_json(
+    val: serde_json::Value,
+    event_sender: &Sender<SpotifyEvent>,
+    last_art_url: &mut Option<String>,
+) {
+    let is_playing = val["is_playing"].as_bool().unwrap_or(false);
+    let progress_ms = val["progress_ms"].as_u64().unwrap_or(0);
+
+    let item = &val["item"];
+    if item.is_null() {
+        return;
+    }
+
+    let track_name = item["name"].as_str().unwrap_or("Unknown Track").to_string();
+    let duration_ms = item["duration_ms"].as_u64().unwrap_or(0);
+
+    // Tracks have artists array; episodes have show.name as publisher
+    let artist_name = if let Some(artists) = item["artists"].as_array() {
+        artists
+            .iter()
+            .filter_map(|a| a["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else if let Some(show) = item["show"]["name"].as_str() {
+        show.to_string()
+    } else {
+        "—".to_string()
+    };
+
+    // Tracks have album; episodes have show
+    let album_name = item["album"]["name"]
+        .as_str()
+        .or_else(|| item["show"]["name"].as_str())
+        .unwrap_or("—")
+        .to_string();
+
+    // Art: track album images, or episode images
+    let art_url: Option<String> = item["album"]["images"]
+        .as_array()
+        .and_then(|imgs| imgs.first())
+        .and_then(|img| img["url"].as_str())
+        .or_else(|| {
+            item["images"]
+                .as_array()
+                .and_then(|imgs| imgs.first())
+                .and_then(|img| img["url"].as_str())
+        })
+        .map(|s| s.to_string());
+
+    // Spawn art download if URL changed
+    if art_url != *last_art_url {
+        *last_art_url = art_url.clone();
+        if let Some(ref url) = art_url {
+            let url_clone = url.clone();
+            let sender_clone = event_sender.clone();
+            tokio::spawn(async move {
+                if let Ok(resp) = reqwest::get(&url_clone).await {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if let Ok(img) = image::load_from_memory(&bytes) {
+                            let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    let _ = event_sender.send(SpotifyEvent::PlaybackUpdate(SpotifyPlaybackState {
+        track_name,
+        artist_name,
+        album_name,
+        album_art_url: art_url,
+        progress_ms,
+        duration_ms,
+        is_playing,
+    }));
+}
+
 
 async fn fetch_and_send_playlists(spotify: &AuthCodePkceSpotify, event_sender: &Sender<SpotifyEvent>) {
     let mut stream = spotify.current_user_playlists();
@@ -396,42 +469,74 @@ async fn fetch_and_send_playlists(spotify: &AuthCodePkceSpotify, event_sender: &
 }
 
 async fn fetch_recent_or_idle_track(spotify: &AuthCodePkceSpotify, event_sender: &Sender<SpotifyEvent>) {
-    // Only show recent track if nothing is currently playing
-    if let Ok(recent) = spotify.current_user_recently_played(Some(1), None).await {
-        if let Some(first) = recent.items.first() {
-            let track = &first.track;
-            let artists = track
-                .artists
-                .iter()
-                .map(|a| a.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let art_url = track.album.images.first().map(|img| img.url.clone());
-            let duration_ms = track.duration.num_milliseconds().max(0) as u64;
+    let access_token = {
+        match spotify.get_token().lock().await {
+            Ok(guard) => guard.as_ref().map(|t| t.access_token.clone()),
+            Err(_) => None,
+        }
+    };
+    let token = match access_token {
+        Some(t) => t,
+        None => return,
+    };
 
-            if let Some(ref url) = art_url {
-                let url_clone = url.clone();
-                let sender_clone = event_sender.clone();
-                tokio::spawn(async move {
-                    if let Ok(resp) = reqwest::get(&url_clone).await {
-                        if let Ok(bytes) = resp.bytes().await {
-                            if let Ok(img) = image::load_from_memory(&bytes) {
-                                let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
-                            }
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.spotify.com/v1/me/player/recently-played?limit=1")
+        .bearer_auth(&token)
+        .send()
+        .await;
+
+    if let Ok(r) = resp {
+        if r.status().is_success() {
+            if let Ok(text) = r.text().await {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(first) = val["items"].as_array().and_then(|a| a.first()) {
+                        let track = &first["track"];
+                        let name = track["name"].as_str().unwrap_or("Unknown").to_string();
+                        let artists = track["artists"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x["name"].as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_else(|| "—".to_string());
+                        let album = track["album"]["name"].as_str().unwrap_or("—").to_string();
+                        let duration_ms = track["duration_ms"].as_u64().unwrap_or(0);
+                        let art_url: Option<String> = track["album"]["images"]
+                            .as_array()
+                            .and_then(|imgs| imgs.first())
+                            .and_then(|img| img["url"].as_str())
+                            .map(|s| s.to_string());
+
+                        if let Some(ref url) = art_url {
+                            let url_clone = url.clone();
+                            let sender_clone = event_sender.clone();
+                            tokio::spawn(async move {
+                                if let Ok(resp) = reqwest::get(&url_clone).await {
+                                    if let Ok(bytes) = resp.bytes().await {
+                                        if let Ok(img) = image::load_from_memory(&bytes) {
+                                            let _ = sender_clone.send(SpotifyEvent::AlbumArtLoaded(img));
+                                        }
+                                    }
+                                }
+                            });
                         }
-                    }
-                });
-            }
 
-            let _ = event_sender.send(SpotifyEvent::PlaybackUpdate(SpotifyPlaybackState {
-                track_name: track.name.clone(),
-                artist_name: artists,
-                album_name: track.album.name.clone(),
-                album_art_url: art_url,
-                progress_ms: 0,
-                duration_ms,
-                is_playing: false,
-            }));
+                        let _ = event_sender.send(SpotifyEvent::PlaybackUpdate(SpotifyPlaybackState {
+                            track_name: name,
+                            artist_name: artists,
+                            album_name: album,
+                            album_art_url: art_url,
+                            progress_ms: 0,
+                            duration_ms,
+                            is_playing: false,
+                        }));
+                    }
+                }
+            }
         }
     }
 }

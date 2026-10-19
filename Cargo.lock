@@ -2342,6 +2342,7 @@ dependencies = [
  "rspotify",
  "rtrb",
  "rustfft",
+ "serde_json",
  "symphonia",
  "tokio",
  "unicode-width 0.2.0",
