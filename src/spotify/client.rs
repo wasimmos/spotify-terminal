@@ -413,15 +413,15 @@ fn handle_playback_json(
         .unwrap_or("—")
         .to_string();
 
-    // Prefer 300x300 image (index 1) for sharper, faster downscaling, fallback to first
+    // Prefer highest resolution 640x640 image (index 0) for crystal clear HD album cover!
     let art_url: Option<String> = item["album"]["images"]
         .as_array()
-        .and_then(|imgs| imgs.get(1).or_else(|| imgs.first()))
+        .and_then(|imgs| imgs.first())
         .and_then(|img| img["url"].as_str())
         .or_else(|| {
             item["images"]
                 .as_array()
-                .and_then(|imgs| imgs.get(1).or_else(|| imgs.first()))
+                .and_then(|imgs| imgs.first())
                 .and_then(|img| img["url"].as_str())
         })
         .map(|s| s.to_string());

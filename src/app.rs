@@ -1,4 +1,5 @@
 use image::DynamicImage;
+use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,6 +26,8 @@ pub struct App {
     pub playback_time_ms: u64,
 
     pub album_cover: Option<DynamicImage>,
+    pub picker: Picker,
+    pub album_image_state: Option<StatefulProtocol>,
     pub theme: ThemeMode,
     pub view_mode: CardViewMode,
 
@@ -56,7 +59,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(picker: Picker) -> Self {
         let audio_engine = AudioEngine::new();
         let visualizer = VisualizerAnalyzer::new(32, 44100);
 
@@ -67,6 +70,9 @@ impl App {
         // Load cached album cover from previous track if available
         let album_cover: Option<DynamicImage> =
             image::open("/home/insane/spotify-terminal/.current_cover.png").ok();
+        let album_image_state = album_cover
+            .as_ref()
+            .map(|img| picker.new_resize_protocol(img.clone()));
 
         let playlists = vec![
             "Bollywood Soul & Ghazals".to_string(),
@@ -101,6 +107,8 @@ impl App {
             playback_time_ms: 0,
 
             album_cover,
+            picker,
+            album_image_state,
             theme: ThemeMode::DiscoIce,
             view_mode: CardViewMode::Lyrics,
 
@@ -198,6 +206,7 @@ impl App {
                     self.is_playing = state.is_playing;
                 }
                 SpotifyEvent::AlbumArtLoaded(img) => {
+                    self.album_image_state = Some(self.picker.new_resize_protocol(img.clone()));
                     self.album_cover = Some(img);
                 }
                 SpotifyEvent::PlaylistsLoaded(playlists) => {

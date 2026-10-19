@@ -20,75 +20,43 @@ impl Widget for AlbumSubControlsWidget {
             return;
         }
 
-        let play_icon = if self.is_playing { "⏸" } else { "▶" };
-
-        // Each button: padding + icon + padding
-        // Layout: [⏮] [▶] [⏭]  (stop removed — space is play/pause)
-        struct Btn<'a> {
-            icon: &'a str,
-            is_accent: bool,
-        }
-
-        let buttons = [
-            Btn { icon: "⏮", is_accent: false },
-            Btn { icon: play_icon, is_accent: true },
-            Btn { icon: "⏭", is_accent: false },
-        ];
+        let play_icon = if self.is_playing { " ⏸ " } else { " ▶ " };
+        let prev_icon = " ⏮ ";
+        let next_icon = " ⏭ ";
 
         let accent_bg = self.theme.title_color();
-        let accent_fg = Color::Rgb(15, 12, 25);
+        let accent_fg = Color::Rgb(16, 14, 26);
         let normal_bg = Color::Rgb(38, 34, 52);
-        let normal_fg = Color::Rgb(200, 200, 220);
+        let normal_fg = Color::Rgb(220, 220, 240);
 
-        // Calculate total width for centering
-        // Each button is " icon " (3 chars) + 1 separator gap, except last
-        let btn_width: u16 = 5; // " X " with padding
-        let total_w = btn_width * buttons.len() as u16 + (buttons.len() as u16 - 1);
+        // 3 buttons of 3 chars each + 2 gaps of 2 spaces = 13 chars
+        let total_w: u16 = 13;
         let start_x = area.x + area.width.saturating_sub(total_w) / 2;
         let y = area.y;
 
-        let mut cx = start_x;
-        for (i, btn) in buttons.iter().enumerate() {
-            let (fg, bg) = if btn.is_accent {
-                (accent_fg, accent_bg)
-            } else {
-                (normal_fg, normal_bg)
-            };
+        // Previous button
+        buf.set_string(
+            start_x,
+            y,
+            prev_icon,
+            Style::default().fg(normal_fg).bg(normal_bg).add_modifier(Modifier::BOLD),
+        );
 
-            let style = Style::default()
-                .fg(fg)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD);
+        // Play/Pause button (Hero button with accent color)
+        buf.set_string(
+            start_x + 5,
+            y,
+            play_icon,
+            Style::default().fg(accent_fg).bg(accent_bg).add_modifier(Modifier::BOLD),
+        );
 
-            // Render " icon " (padded)
-            let label = format!(" {} ", btn.icon);
-            buf.set_string(cx, y, &label, style);
-            cx += label.chars().count() as u16;
-
-            // Separator between buttons (not after last)
-            if i < buttons.len() - 1 {
-                buf.set_string(
-                    cx,
-                    y,
-                    "│",
-                    Style::default().fg(Color::Rgb(60, 55, 80)),
-                );
-                cx += 1;
-            }
-        }
-
-        // Second row: volume indicator (if height allows)
-        if area.height >= 2 {
-            let vol_pct = 85u8; // TODO: wire to app.volume when controls get click support
-            let vol_str = format!("🔊 {}%", vol_pct);
-            let vx = area.x + area.width.saturating_sub(vol_str.chars().count() as u16) / 2;
-            buf.set_string(
-                vx,
-                area.y + 1,
-                &vol_str,
-                Style::default().fg(Color::Rgb(110, 110, 130)),
-            );
-        }
+        // Next button
+        buf.set_string(
+            start_x + 10,
+            y,
+            next_icon,
+            Style::default().fg(normal_fg).bg(normal_bg).add_modifier(Modifier::BOLD),
+        );
     }
 }
 

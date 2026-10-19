@@ -62,12 +62,17 @@ impl<'a> Widget for LyricsWidget<'a> {
             }
         }
 
-        let center_y = area.y + (area.height / 2);
+        // Position lyrics higher up in the card: active line around row 3, so previous 3 lines start at top
+        let active_y = (area.y + 3).min(area.bottom().saturating_sub(1));
 
         for (i, line) in self.lyrics.iter().enumerate() {
             let diff = i as i32 - active_idx as i32;
-            // 1 empty terminal row between lyrics for elegant typography & breathing room
-            let line_y = center_y as i32 + diff;
+            // Show only 6-7 lines at once (active line ± 3 lines)
+            if diff.abs() > 3 {
+                continue;
+            }
+
+            let line_y = active_y as i32 + diff;
 
             if line_y < area.y as i32 || line_y >= area.bottom() as i32 {
                 continue;

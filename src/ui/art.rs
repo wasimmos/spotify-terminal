@@ -43,7 +43,7 @@ impl<'a> Widget for AlbumArtWidget<'a> {
         let pixel_height = (square_rows * 2) as u32;
 
         let offset_x = area.x + (area.width.saturating_sub(square_cols)) / 2;
-        let offset_y = area.y + (area.height.saturating_sub(square_rows)) / 2;
+        let offset_y = area.y;
 
         if let Some(img) = self.image {
             // High-quality Lanczos3 filter preserves fine details and sharp edges

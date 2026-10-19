@@ -24,16 +24,16 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     // 1. Top Title Bar: "✦ wasimmos" (1 row)
     // 2. Now Playing Card (flexible)
     // 3. Middle Progress Bar ONLY (1 row - removed hotkey line!)
-    // 4. Bottom Discrete CAVA Visualizer (~40% of screen height)
-    let vis_height = ((size.height as f32) * 0.32).clamp(7.0, 14.0) as u16;
+    // 4. Bottom Discrete CAVA Visualizer (60-65% of screen height)
+    let vis_height = ((size.height as f32) * 0.62).round().max(10.0) as u16;
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),                  // Top title bar: "wasimmos"
-            Constraint::Min(16),                    // Now Playing card (room for large sharp album cover!)
+            Constraint::Min(8),                     // Now Playing card (~35% of screen)
             Constraint::Length(1),                  // Clean progress bar only!
-            Constraint::Length(vis_height),         // Discrete CAVA Visualizer
+            Constraint::Length(vis_height),         // Discrete CAVA Visualizer (60-65% of screen!)
         ])
         .split(size);
 
@@ -73,8 +73,10 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     f.render_widget(card_block, card_area);
 
     if inner_card.width > 20 && inner_card.height > 6 {
-        // Prominent Album Art Column: ~26-30 cols wide (like reference image test.png)
-        let album_col_width: u16 = if inner_card.width > 100 { 30 } else if inner_card.width > 80 { 26 } else { 22 };
+        // Calculate square cover geometry
+        let max_art_rows = inner_card.height.saturating_sub(1);
+        let album_col_width: u16 = if inner_card.width > 100 { 26 } else if inner_card.width > 80 { 22 } else { 18 };
+        let square_rows = (album_col_width / 2).min(max_art_rows);
 
         let card_horiz = Layout::default()
             .direction(Direction::Horizontal)
@@ -87,32 +89,32 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         let left_album_pane = card_horiz[0];
         let right_content_pane = card_horiz[1];
 
-        // Left Pane: Give album art all available height minus the 3 rows for controls
-        let ctrl_height = 3u16;
-        let art_height = left_album_pane.height.saturating_sub(ctrl_height);
-
+        // Left Pane: Album Art at top + transport controls directly below (zero gap!)
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(art_height),  // Prominent album cover
-                Constraint::Length(ctrl_height), // Play/pause/skip controls directly below
-                Constraint::Min(0),              // Spacer
+                Constraint::Length(square_rows), // Album cover positioned at top
+                Constraint::Length(1),           // Transport controls directly beneath cover
+                Constraint::Min(0),              // Remaining spacer
             ])
             .split(left_album_pane);
 
         let art_area = left_chunks[0];
         let sub_controls_area = left_chunks[1];
 
-        // Save album area for native Kitty Graphics Protocol placement
-        app.album_area = Some(art_area);
+        // Render Album Art: use high-resolution graphics protocol if available, or procedural fallback
+        if let Some(ref mut image_state) = app.album_image_state {
+            let img_widget = ratatui_image::StatefulImage::default()
+                .resize(ratatui_image::Resize::Fit(None));
+            f.render_stateful_widget(img_widget, art_area, image_state);
+        } else {
+            f.render_widget(
+                AlbumArtWidget::new(theme, app.album_cover.as_ref(), app.anim_time),
+                art_area,
+            );
+        }
 
-        // Render Album Art
-        f.render_widget(
-            AlbumArtWidget::new(theme, app.album_cover.as_ref(), app.anim_time),
-            art_area,
-        );
-
-        // Render Prominent Transport Controls directly below Album Art
+        // Render sleek Transport Controls directly below Album Art
         f.render_widget(
             AlbumSubControlsWidget {
                 is_playing: app.is_playing,
@@ -121,11 +123,12 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
             sub_controls_area,
         );
 
-        // Right Pane: Header (Song title + Mode Toggle Tabs + Playing Badge) + Body (Lyrics / Details)
+        // Right Pane: Header (Song title + Playing Badge) + Body (Lyrics / Details)
+        // Taking header to 2 rows moves lyrics higher up
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header row with mode tabs
+                Constraint::Length(2), // Clean compact header line
                 Constraint::Min(4),    // Content area (Lyrics OR Song Details)
             ])
             .split(right_content_pane);
@@ -133,25 +136,8 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         let header_area = right_chunks[0];
         let body_area = right_chunks[1];
 
-        // Header: `🎤 Song Title` + Mode Tabs `[ 📝 Lyrics (L) ] [ ℹ Details (D) ]` + `[ 🎵 playing ]`
-        let play_badge = if app.is_playing { "🎵 playing" } else { "⏸ paused" };
-
-        let (lyrics_tab_style, details_tab_style) = match app.view_mode {
-            CardViewMode::Lyrics => (
-                Style::default()
-                    .fg(Color::Rgb(20, 20, 30))
-                    .bg(theme.title_color())
-                    .add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(35, 30, 48)),
-            ),
-            CardViewMode::SongDetails => (
-                Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(35, 30, 48)),
-                Style::default()
-                    .fg(Color::Rgb(20, 20, 30))
-                    .bg(theme.title_color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        };
+        // Header: `🎤 Song Title  •  Artist` (full width, no buttons to truncate singer name!)
+        let play_badge = if app.is_playing { " 🎵 playing " } else { " ⏸ paused " };
 
         let title_line = Line::from(vec![
             Span::styled("🎤  ", Style::default().fg(theme.title_color())),
@@ -159,26 +145,22 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
             Span::styled(format!("  •  {}", app.current_artist), Style::default().fg(Color::Rgb(160, 160, 180))),
         ]);
 
-        let right_controls_line = Line::from(vec![
-            Span::styled(" 📝 Lyrics (L) ", lyrics_tab_style),
-            Span::raw(" "),
-            Span::styled(" ℹ Details (D) ", details_tab_style),
-            Span::raw("   "),
-            Span::styled(format!(" {} ", play_badge), Style::default().fg(Color::White).bg(Color::Rgb(40, 38, 55))),
+        let right_badge_line = Line::from(vec![
+            Span::styled(play_badge, Style::default().fg(Color::White).bg(Color::Rgb(40, 38, 55))),
         ]);
 
         let header_horiz = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(10),
-                Constraint::Length(40),
+                Constraint::Length(14),
             ])
             .split(header_area);
 
         f.render_widget(Paragraph::new(title_line), header_horiz[0]);
-        f.render_widget(Paragraph::new(right_controls_line), header_horiz[1]);
+        f.render_widget(Paragraph::new(right_badge_line), header_horiz[1]);
 
-        // Body: Switch between Lyrics mode and Song Details mode
+        // Body: Switch between Lyrics mode and Song Details mode (toggled via 'l' and 'd' hotkeys)
         match app.view_mode {
             CardViewMode::Lyrics => {
                 f.render_widget(

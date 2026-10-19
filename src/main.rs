@@ -32,7 +32,17 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut picker = ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| {
+        ratatui_image::picker::Picker::halfblocks()
+    });
+    if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks
+        && (std::env::var("KITTY_WINDOW_ID").is_ok()
+            || std::env::var("TERM").map(|t| t.contains("kitty")).unwrap_or(false))
+    {
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    }
+
+    let mut app = App::new(picker);
 
     // 60 FPS tick rate (~16ms)
     let tick_rate = Duration::from_millis(16);
