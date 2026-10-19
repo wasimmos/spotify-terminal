@@ -49,17 +49,46 @@ impl VisualizerAnalyzer {
         }
     }
 
+    /// Smoothly decay bars towards zero when music is paused or silent
+    pub fn decay_bands(&mut self) {
+        for b in self.bands.iter_mut() {
+            *b = (*b * self.gravity).max(0.0);
+            if *b < 0.005 {
+                *b = 0.0;
+            }
+        }
+        for (i, p) in self.peaks.iter_mut().enumerate() {
+            if i < self.peak_speeds.len() {
+                self.peak_speeds[i] += 0.004;
+                *p = (*p - self.peak_speeds[i]).max(0.0);
+            }
+        }
+    }
+
     /// Process PCM audio samples and update frequency bands
     pub fn process_samples(&mut self, samples: &[f32]) {
         let num_bars = self.bands.len();
-        if num_bars == 0 {
+        if num_bars == 0 || samples.is_empty() {
+            self.decay_bands();
+            return;
+        }
+
+        // Check overall RMS energy
+        let count = samples.len().min(self.fft_size);
+        let mut sum_sq = 0.0f32;
+        for i in 0..count {
+            sum_sq += samples[i] * samples[i];
+        }
+        let rms = (sum_sq / count as f32).sqrt();
+        if rms < 0.0008 {
+            // Signal is essentially silence
+            self.decay_bands();
             return;
         }
 
         let mut buffer: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); self.fft_size];
 
-        // Apply window and copy samples
-        let count = samples.len().min(self.fft_size);
+        // Apply Hann window and copy samples
         for i in 0..count {
             buffer[i] = Complex::new(samples[i] * self.window[i], 0.0);
         }
@@ -72,11 +101,11 @@ impl VisualizerAnalyzer {
         let num_bins = self.fft_size / 2;
         let mut magnitudes: Vec<f32> = Vec::with_capacity(num_bins);
         for i in 0..num_bins {
-            let mag = (buffer[i].norm() / (self.fft_size as f32 / 2.0)) * 2.5;
+            let mag = buffer[i].norm() / (self.fft_size as f32 / 2.0);
             magnitudes.push(mag);
         }
 
-        // Map FFT bins to logarithmic perceptual frequency bands (20 Hz - 18 kHz)
+        // Map FFT bins to logarithmic perceptual frequency bands (25 Hz - 16 kHz)
         let min_freq = 25.0f32;
         let max_freq = 16000.0f32;
         let nyquist = self.sample_rate as f32 / 2.0;
@@ -84,7 +113,6 @@ impl VisualizerAnalyzer {
         let mut raw_bands = vec![0.0f32; num_bars];
 
         for (bar_idx, band) in raw_bands.iter_mut().enumerate() {
-            // Logarithmic spacing
             let f_low = min_freq * (max_freq / min_freq).powf(bar_idx as f32 / num_bars as f32);
             let f_high = min_freq * (max_freq / min_freq).powf((bar_idx + 1) as f32 / num_bars as f32);
 
@@ -104,22 +132,24 @@ impl VisualizerAnalyzer {
             let avg = if count > 0 { sum / count as f32 } else { 0.0 };
 
             // Apply perceptual frequency weighting (equal-loudness / treble boost)
-            let freq_boost = 1.0 + (bar_idx as f32 / num_bars as f32) * 2.2;
-            *band = (avg * freq_boost).clamp(0.0, 1.0);
+            let freq_boost = 1.2 + (bar_idx as f32 / num_bars as f32).powf(0.8) * 4.0;
+            // Dynamic range compression so small nuances register and loud hits peak cleanly
+            let val = (avg * freq_boost * 3.5).powf(0.68);
+            *band = val.clamp(0.0, 1.0);
         }
 
-        // Smooth bands with gravity decay
+        // Smooth bands with organic gravity decay
         for i in 0..num_bars {
             let current = raw_bands[i];
             if current > self.bands[i] {
-                // Instant rise on audio beats
+                // Snappy response on audio transients
                 self.bands[i] = current;
             } else {
                 // Organic falloff
                 self.bands[i] = (self.bands[i] * self.gravity).max(0.0);
             }
 
-            // Peaks
+            // Peak indicators
             if self.bands[i] >= self.peaks[i] {
                 self.peaks[i] = self.bands[i];
                 self.peak_speeds[i] = 0.005;
@@ -129,15 +159,15 @@ impl VisualizerAnalyzer {
             }
         }
 
-        // Light neighbor smoothing for that liquid CAVA aesthetic
+        // Neighbor smoothing for liquid CAVA-like wave contour
         let mut smoothed = self.bands.clone();
         for i in 1..num_bars - 1 {
-            smoothed[i] = 0.25 * self.bands[i - 1] + 0.5 * self.bands[i] + 0.25 * self.bands[i + 1];
+            smoothed[i] = 0.20 * self.bands[i - 1] + 0.60 * self.bands[i] + 0.20 * self.bands[i + 1];
         }
         self.bands = smoothed;
     }
 
-    /// Generates procedural rhythmic audio visualization frames (for demo/standby mode)
+    /// Generates procedural rhythmic audio visualization frames (standby mode fallback)
     pub fn update_procedural(&mut self, time: f32) {
         let num_bars = self.bands.len();
         if num_bars == 0 {
@@ -147,11 +177,8 @@ impl VisualizerAnalyzer {
         let mut raw_bands = vec![0.0f32; num_bars];
         for i in 0..num_bars {
             let ratio = i as f32 / num_bars as f32;
-            // Rhythmic kick beat on bass (left)
             let kick = ((time * 3.5).sin().powi(4) * 0.9).max(0.0) * (1.0 - ratio).powi(2);
-            // Snare / high hat flutter on treble (right)
             let hats = ((time * 7.0 + ratio * 8.0).cos().abs() * 0.6) * ratio.powf(0.8);
-            // Mid melody wave
             let melody = ((time * 2.2 + ratio * 4.0).sin().abs() * 0.5) * (1.0 - (ratio - 0.5).abs() * 1.5).max(0.0);
 
             raw_bands[i] = (kick + hats + melody).clamp(0.0, 1.0);
@@ -162,14 +189,6 @@ impl VisualizerAnalyzer {
                 self.bands[i] = raw_bands[i];
             } else {
                 self.bands[i] = (self.bands[i] * self.gravity).max(0.0);
-            }
-
-            if self.bands[i] >= self.peaks[i] {
-                self.peaks[i] = self.bands[i];
-                self.peak_speeds[i] = 0.005;
-            } else {
-                self.peak_speeds[i] += 0.003;
-                self.peaks[i] = (self.peaks[i] - self.peak_speeds[i]).max(0.0);
             }
         }
     }

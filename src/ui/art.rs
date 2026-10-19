@@ -26,14 +26,32 @@ impl<'a> Widget for AlbumArtWidget<'a> {
             return;
         }
 
-        let pixel_width = area.width as u32;
-        let pixel_height = (area.height * 2) as u32; // 2 vertical pixels per text cell using '▀'
+        // Terminal text cell geometry:
+        // A character cell has roughly a 1:2 width:height ratio (e.g. 9px wide x 18px tall).
+        // Each cell contains two half-blocks ('▀'), making each half-block ~9px x 9px (square).
+        // Therefore, for a 1:1 square image:
+        // number of horizontal columns (cells) = number of vertical half-blocks (rows * 2).
+        let max_cols_from_height = area.height.saturating_mul(2);
+        let square_cols = area.width.min(max_cols_from_height) & !1; // Ensure even
+        let square_rows = square_cols / 2;
+
+        if square_cols == 0 || square_rows == 0 {
+            return;
+        }
+
+        let pixel_width = square_cols as u32;
+        let pixel_height = (square_rows * 2) as u32; // pixel_width == pixel_height -> perfect 1:1 square!
+
+        // Center the square album art cleanly inside the allotted area
+        let offset_x = area.x + (area.width.saturating_sub(square_cols)) / 2;
+        let offset_y = area.y + (area.height.saturating_sub(square_rows)) / 2;
 
         if let Some(img) = self.image {
-            // Resize image cleanly to target cell dimensions
-            let resized = img.resize_exact(pixel_width, pixel_height, FilterType::Triangle);
-            for y_cell in 0..area.height {
-                for x in 0..area.width {
+            // High-quality Lanczos3 downsampling preserves sharp edges and fine details
+            let resized = img.resize_exact(pixel_width, pixel_height, FilterType::Lanczos3);
+
+            for y_cell in 0..square_rows {
+                for x in 0..square_cols {
                     let top_y = (y_cell * 2) as u32;
                     let bot_y = (y_cell * 2 + 1) as u32;
 
@@ -44,18 +62,32 @@ impl<'a> Widget for AlbumArtWidget<'a> {
                         top_pixel
                     };
 
-                    let top_color = Color::Rgb(top_pixel[0], top_pixel[1], top_pixel[2]);
-                    let bot_color = Color::Rgb(bot_pixel[0], bot_pixel[1], bot_pixel[2]);
+                    // Slight contrast boost to make terminal colors punchy and clear
+                    let top_color = Color::Rgb(
+                        boost_color(top_pixel[0]),
+                        boost_color(top_pixel[1]),
+                        boost_color(top_pixel[2]),
+                    );
+                    let bot_color = Color::Rgb(
+                        boost_color(bot_pixel[0]),
+                        boost_color(bot_pixel[1]),
+                        boost_color(bot_pixel[2]),
+                    );
 
-                    buf[(area.x + x, area.y + y_cell)]
-                        .set_char('▀')
-                        .set_style(Style::default().fg(top_color).bg(bot_color));
+                    let target_x = offset_x + x;
+                    let target_y = offset_y + y_cell;
+
+                    if target_x < area.right() && target_y < area.bottom() {
+                        buf[(target_x, target_y)]
+                            .set_char('▀')
+                            .set_style(Style::default().fg(top_color).bg(bot_color));
+                    }
                 }
             }
         } else {
-            // Procedural aesthetic synthwave cover fallback
-            for y_cell in 0..area.height {
-                for x in 0..area.width {
+            // Procedural synthwave cover fallback (also 1:1 square!)
+            for y_cell in 0..square_rows {
+                for x in 0..square_cols {
                     let top_y = (y_cell * 2) as f32;
                     let bot_y = (y_cell * 2 + 1) as f32;
 
@@ -76,16 +108,41 @@ impl<'a> Widget for AlbumArtWidget<'a> {
                         self.time,
                     );
 
-                    buf[(area.x + x, area.y + y_cell)]
-                        .set_char('▀')
-                        .set_style(Style::default().fg(top_color).bg(bot_color));
+                    let target_x = offset_x + x;
+                    let target_y = offset_y + y_cell;
+
+                    if target_x < area.right() && target_y < area.bottom() {
+                        buf[(target_x, target_y)]
+                            .set_char('▀')
+                            .set_style(Style::default().fg(top_color).bg(bot_color));
+                    }
                 }
             }
         }
     }
 }
 
-fn procedural_art_color(x: f32, y: f32, width: f32, height: f32, theme: ThemeMode, time: f32) -> Color {
+/// Gentle contrast & vibrancy curve for terminal display
+#[inline]
+fn boost_color(c: u8) -> u8 {
+    let f = c as f32 / 255.0;
+    // S-curve for contrast: shadows deepen slightly, highlights stay clear
+    let s = if f < 0.5 {
+        2.0 * f * f
+    } else {
+        1.0 - 2.0 * (1.0 - f) * (1.0 - f)
+    };
+    (s * 255.0).clamp(0.0, 255.0) as u8
+}
+
+fn procedural_art_color(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    theme: ThemeMode,
+    time: f32,
+) -> Color {
     let nx = (x / width) * 2.0 - 1.0;
     let ny = (y / height) * 2.0 - 1.0;
     let horizon = 0.2;

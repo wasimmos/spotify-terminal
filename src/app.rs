@@ -44,6 +44,7 @@ pub struct App {
     pub track_details: TrackDetails,
     pub visualizer: VisualizerAnalyzer,
     pub audio_engine: AudioEngine,
+    pub audio_buffer: Vec<f32>,
 
     pub anim_time: f32,
     pub should_quit: bool,
@@ -55,7 +56,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let (audio_engine, _) = AudioEngine::new();
+        let audio_engine = AudioEngine::new();
         let visualizer = VisualizerAnalyzer::new(32, 44100);
 
         // Spotify background manager channel
@@ -65,7 +66,6 @@ impl App {
         // Start with NO album cover — procedural synthwave fallback renders until real art arrives
         let album_cover: Option<DynamicImage> = None;
 
-        // Empty playlists — will be loaded from Spotify on connect
         let playlists = vec![
             "Bollywood Soul & Ghazals".to_string(),
             "Late Night Acoustic & Lo-Fi".to_string(),
@@ -75,7 +75,6 @@ impl App {
             "♥ Liked Songs".to_string(),
         ];
 
-        // Empty lyrics — will show "No Synced Lyrics" until track data arrives
         let lyrics = vec![];
 
         let track_details = TrackDetails {
@@ -117,6 +116,7 @@ impl App {
             track_details,
             visualizer,
             audio_engine,
+            audio_buffer: vec![0.0; 1024],
 
             anim_time: 0.0,
             should_quit: false,
@@ -163,20 +163,14 @@ impl App {
                     self.is_playing = false;
                 }
                 SpotifyEvent::PlaybackUpdate(state) => {
-                    // Detect track change — reset art + lyrics when song switches
                     let new_track_id = format!("{}::{}", state.track_name, state.artist_name);
                     if new_track_id != self.last_track_id {
                         self.last_track_id = new_track_id;
 
-                        // Clear stale album cover so new one downloads
-                        // (AlbumArtLoaded event will replace it with real art)
+                        // Reset stale art and lyrics while fresh data fetches
                         self.album_cover = None;
-
-                        // Clear lyrics — Spotify free API doesn't provide synced lyrics.
-                        // Show the empty-state message instead.
                         self.lyrics = vec![];
 
-                        // Reset track details placeholders
                         self.track_details.release_year = "—".to_string();
                         self.track_details.genre = "—".to_string();
                         self.track_details.tempo = "—".to_string();
@@ -195,8 +189,6 @@ impl App {
                     self.track_details.format = "Spotify Web Stream".to_string();
                     self.track_details.bitrate = "Ogg Vorbis 320 kbps".to_string();
 
-                    // Only update progress from Spotify if it's actually playing
-                    // (avoids overwrite when a recently-played idle track is fetched)
                     if state.is_playing || self.playback_time_ms == 0 {
                         self.playback_time_ms = state.progress_ms;
                     }
@@ -211,6 +203,11 @@ impl App {
                         self.playlists = playlists;
                     }
                 }
+                SpotifyEvent::LyricsLoaded { track_id, lyrics } => {
+                    if self.last_track_id == track_id {
+                        self.lyrics = lyrics;
+                    }
+                }
             }
         }
 
@@ -222,8 +219,22 @@ impl App {
             {
                 self.playback_time_ms = self.duration.as_millis() as u64;
             }
+        }
 
-            self.visualizer.update_procedural(self.anim_time);
+        // Real audio visualizer analysis (captured live from default speaker output)
+        let mut new_samples = Vec::new();
+        self.audio_engine.read_samples(&mut new_samples);
+
+        if !new_samples.is_empty() {
+            self.audio_buffer.extend(new_samples);
+            if self.audio_buffer.len() > 1024 {
+                let overflow = self.audio_buffer.len() - 1024;
+                self.audio_buffer.drain(0..overflow);
+            }
+            self.visualizer.process_samples(&self.audio_buffer);
+        } else {
+            // Decay bars smoothly towards zero when silent/paused
+            self.visualizer.decay_bands();
         }
     }
 
@@ -240,14 +251,12 @@ impl App {
 
     pub fn next_track(&mut self) {
         self.playback_time_ms = 0;
-        // Force track change detection on next poll
         self.last_track_id = String::new();
         self.spotify.next_track();
     }
 
     pub fn previous_track(&mut self) {
         self.playback_time_ms = 0;
-        // Force track change detection on next poll
         self.last_track_id = String::new();
         self.spotify.previous_track();
     }
