@@ -44,13 +44,6 @@ fn main() -> Result<()> {
             render_ui(f, &mut app);
         })?;
 
-        // Render native high-resolution album cover if terminal supports Kitty graphics
-        if app.album_cover.is_some() {
-            if let Some(area) = app.album_area {
-                crate::ui::art::render_kitty_art(area);
-            }
-        }
-
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -138,7 +131,6 @@ fn main() -> Result<()> {
     }
 
     // Restore terminal
-    crate::ui::art::clear_kitty_images();
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
     terminal.show_cursor()?;

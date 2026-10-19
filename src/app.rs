@@ -64,8 +64,9 @@ impl App {
         let (spotify_tx, spotify_rx) = channel::<SpotifyEvent>();
         let spotify = SpotifyManager::spawn(spotify_tx);
 
-        // Start with NO album cover — procedural synthwave fallback renders until real art arrives
-        let album_cover: Option<DynamicImage> = None;
+        // Load cached album cover from previous track if available
+        let album_cover: Option<DynamicImage> =
+            image::open("/home/insane/spotify-terminal/.current_cover.png").ok();
 
         let playlists = vec![
             "Bollywood Soul & Ghazals".to_string(),
@@ -169,8 +170,7 @@ impl App {
                     if new_track_id != self.last_track_id {
                         self.last_track_id = new_track_id;
 
-                        // Reset stale art and lyrics while fresh data fetches
-                        self.album_cover = None;
+                        // Reset lyrics while fresh data fetches
                         self.lyrics = vec![];
 
                         self.track_details.release_year = "—".to_string();
@@ -254,14 +254,12 @@ impl App {
     pub fn next_track(&mut self) {
         self.playback_time_ms = 0;
         self.last_track_id = String::new();
-        crate::ui::art::clear_kitty_images();
         self.spotify.next_track();
     }
 
     pub fn previous_track(&mut self) {
         self.playback_time_ms = 0;
         self.last_track_id = String::new();
-        crate::ui::art::clear_kitty_images();
         self.spotify.previous_track();
     }
 

@@ -25,13 +25,13 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
     // 2. Now Playing Card (flexible)
     // 3. Middle Progress Bar ONLY (1 row - removed hotkey line!)
     // 4. Bottom Discrete CAVA Visualizer (~40% of screen height)
-    let vis_height = ((size.height as f32) * 0.40).round().max(6.0) as u16;
+    let vis_height = ((size.height as f32) * 0.32).clamp(7.0, 14.0) as u16;
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),                  // Top title bar: "wasimmos"
-            Constraint::Min(12),                    // Now Playing card
+            Constraint::Min(16),                    // Now Playing card (room for large sharp album cover!)
             Constraint::Length(1),                  // Clean progress bar only!
             Constraint::Length(vis_height),         // Discrete CAVA Visualizer
         ])
@@ -87,16 +87,16 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         let left_album_pane = card_horiz[0];
         let right_content_pane = card_horiz[1];
 
-        // Left Pane: Album Art + Bigger Controls directly below
-        let max_art_h = left_album_pane.height.saturating_sub(4);
-        let art_height = (album_col_width / 2).clamp(9, 14).min(max_art_h);
+        // Left Pane: Give album art all available height minus the 3 rows for controls
+        let ctrl_height = 3u16;
+        let art_height = left_album_pane.height.saturating_sub(ctrl_height);
 
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(art_height), // Prominent album cover
-                Constraint::Length(3),          // Play/pause/skip controls directly below
-                Constraint::Min(0),             // Spacer
+                Constraint::Length(art_height),  // Prominent album cover
+                Constraint::Length(ctrl_height), // Play/pause/skip controls directly below
+                Constraint::Min(0),              // Spacer
             ])
             .split(left_album_pane);
 
