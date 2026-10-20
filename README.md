@@ -11,6 +11,8 @@ A lightning-fast, minimalist terminal music player with Spotify integration and 
 - **60-FPS Real-Time Audio Visualizer**: Integrated with [CAVA](https://github.com/karlstav/cava) with Monstercat spatial smoothing, dynamic auto-gain (AGC), and direct PipeWire / PulseAudio speaker loopback sync.
 - **Crystal-Clear Album Covers**: High-resolution cover art powered by the **Kitty Graphics Protocol** with automatic ANSI TrueColor half-block (`▀`) fallback for standard terminal emulators.
 - **Synced Karaoke Lyrics & Track Details**: View live scrolling lyrics synchronized with playback, or hit `d` to switch to detailed song metadata (Release year, Genre, Audio format, Bitrate, and Up next).
+- **Universal Phonetic Romanization (Hinglish, Romaji, etc.)**: Lyrics in non-Latin scripts (Devanagari/Hindi `मेरी` -> `meri`, Gurmukhi/Punjabi `ਮੇਰੀ` -> `meri`, Korean Hangul `사랑해요` -> `saranghaeyo`, Japanese Kana `ありがとう` -> `arigatou`, Cyrillic `Привет` -> `Privet`) are automatically transliterated into English/Latin letters for singing along—preserving the original words without translating their meaning.
+- **Multi-Source Lyrics Pipeline**: Cascades through LRCLIB exact, title/artist search (prioritizing Latin community lyrics), and Lyrics.ovh with dynamic acoustic timeline guides so every track has lyrics on screen.
 - **Global CLI Command (`spotif`)**: Launch from anywhere in your terminal. Includes built-in `spotif --help` and `spotif --version`.
 - **Interactive Mouse Seeking**: Click anywhere along the middle progress bar to seek instantly.
 - **Collapsible Playlist Explorer**: Browse and live-filter (`/`) your Spotify playlists in a modal window.
