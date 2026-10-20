@@ -82,7 +82,9 @@ impl SpotifyManager {
                 dotenvy::from_path(format!("{}/.config/spotif/.env", home)).ok();
                 dotenvy::from_path(format!("{}/spotify-terminal/.env", home)).ok();
 
-                let client_id = match std::env::var("RSPOTIFY_CLIENT_ID") {
+                let client_id = match std::env::var("RSPOTIFY_CLIENT_ID")
+                    .or_else(|_| std::env::var("SPOTIFY_CLIENT_ID"))
+                {
                     Ok(id) if !id.trim().is_empty() => id.trim().to_string(),
                     _ => {
                         let _ = event_sender.send(SpotifyEvent::Disconnected(
@@ -133,49 +135,71 @@ impl SpotifyManager {
 
                 let mut is_auth = false;
 
-                // Try cached token first
+                // 1. Try cached token first (with robust auto-refresh so user never re-authenticates)
                 if cache_file.exists() {
-                    match spotify.read_token_cache(true).await {
-                        Ok(Some(tok)) => {
-                            *spotify.get_token().lock().await.unwrap() = Some(tok);
-                            // Verify it actually works by making a test call
+                    let mut tok_opt = spotify.read_token_cache(false).await.ok().flatten();
+                    if tok_opt.is_none() {
+                        if let Ok(raw_json) = std::fs::read_to_string(&cache_file) {
+                            tok_opt = serde_json::from_str::<rspotify::model::Token>(&raw_json).ok();
+                        }
+                    }
+
+                    if let Some(tok) = tok_opt {
+                        *spotify.get_token().lock().await.unwrap() = Some(tok.clone());
+
+                        // Check if token is expired or within 60s of expiring
+                        let is_expired = tok.expires_at.map(|exp| exp <= chrono::Utc::now() + chrono::Duration::seconds(60)).unwrap_or(false);
+
+                        if is_expired {
+                            let _ = event_sender.send(SpotifyEvent::Disconnected("🔄 Refreshing session…".to_string()));
+                            let mut refreshed = false;
+                            if let Some(ref r_tok) = tok.refresh_token {
+                                if let Some(new_tok) = direct_refresh_token(&client_id, r_tok, &cache_file).await {
+                                    *spotify.get_token().lock().await.unwrap() = Some(new_tok);
+                                    refreshed = true;
+                                }
+                            }
+                            if !refreshed {
+                                if let Ok(()) = spotify.refresh_token().await {
+                                    let _ = spotify.write_token_cache().await;
+                                    refreshed = true;
+                                }
+                            }
+
+                            if refreshed {
+                                is_auth = true;
+                                let _ = event_sender.send(SpotifyEvent::Connected("🟢 Connected".to_string()));
+                            }
+                        } else {
+                            // Token is currently not expired, verify it
                             match spotify.current_user().await {
                                 Ok(_) => {
                                     is_auth = true;
                                     let _ = event_sender.send(SpotifyEvent::Connected("🟢 Connected".to_string()));
                                 }
-                                Err(e) => {
-                                    // Token invalid/expired — need fresh auth
-                                    let _ = event_sender.send(SpotifyEvent::Disconnected(
-                                        format!("🟡 Token invalid ({}), re-authorizing…", e),
-                                    ));
-                                    let _ = std::fs::remove_file(&cache_file);
-                                    let creds2 = Credentials::new_pkce(&client_id);
-                                    let oauth2 = OAuth {
-                                        redirect_uri: "http://127.0.0.1:8888/callback".to_string(),
-                                        scopes: scopes!(
-                                            "user-read-playback-state",
-                                            "user-modify-playback-state",
-                                            "user-read-currently-playing",
-                                            "playlist-read-private",
-                                            "playlist-read-collaborative",
-                                            "user-library-read",
-                                            "user-read-recently-played"
-                                        ),
-                                        ..Default::default()
-                                    };
-                                    let config2 = Config {
-                                        token_cached: true,
-                                        token_refreshing: true,
-                                        cache_path: cache_file.clone(),
-                                        ..Default::default()
-                                    };
-                                    spotify = AuthCodePkceSpotify::with_config(creds2, oauth2, config2);
+                                Err(_) => {
+                                    // Try refreshing with refresh_token before prompting OAuth!
+                                    let mut refreshed = false;
+                                    if let Some(ref r_tok) = tok.refresh_token {
+                                        if let Some(new_tok) = direct_refresh_token(&client_id, r_tok, &cache_file).await {
+                                            *spotify.get_token().lock().await.unwrap() = Some(new_tok);
+                                            refreshed = true;
+                                        }
+                                    }
+                                    if !refreshed {
+                                        if let Ok(()) = spotify.refresh_token().await {
+                                            let _ = spotify.write_token_cache().await;
+                                            refreshed = true;
+                                        }
+                                    }
+
+                                    if refreshed {
+                                        is_auth = true;
+                                        let _ = event_sender.send(SpotifyEvent::Connected("🟢 Connected".to_string()));
+                                    }
                                 }
                             }
                         }
-                        Ok(None) => {}
-                        Err(_) => {}
                     }
                 }
 
@@ -258,7 +282,7 @@ impl SpotifyManager {
                         Some(cmd) = cmd_rx.recv() => {
                             match cmd {
                                 SpotifyCommand::TogglePlay => {
-                                    if let Some(token) = api_get_token(&spotify).await {
+                                    if let Some(token) = api_get_token(&spotify, &client_id, &cache_file).await {
                                         let client = reqwest::Client::new();
                                         let is_playing = if let Ok(resp) = client
                                             .get("https://api.spotify.com/v1/me/player")
@@ -288,46 +312,46 @@ impl SpotifyManager {
                                             }
                                         }
                                         tokio::time::sleep(Duration::from_millis(250)).await;
-                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count, &client_id, &cache_file).await;
                                     }
                                 }
                                 SpotifyCommand::Play => {
-                                    if let Some(token) = api_get_token(&spotify).await {
+                                    if let Some(token) = api_get_token(&spotify, &client_id, &cache_file).await {
                                         let client = reqwest::Client::new();
                                         let ok = send_player_cmd(&client, &token, reqwest::Method::PUT, "play").await;
                                         if !ok {
                                             activate_device_and_play(&client, &token).await;
                                         }
                                         tokio::time::sleep(Duration::from_millis(250)).await;
-                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count, &client_id, &cache_file).await;
                                     }
                                 }
                                 SpotifyCommand::Pause => {
-                                    if let Some(token) = api_get_token(&spotify).await {
+                                    if let Some(token) = api_get_token(&spotify, &client_id, &cache_file).await {
                                         let client = reqwest::Client::new();
                                         let _ = send_player_cmd(&client, &token, reqwest::Method::PUT, "pause").await;
                                         tokio::time::sleep(Duration::from_millis(250)).await;
-                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count, &client_id, &cache_file).await;
                                     }
                                 }
                                 SpotifyCommand::NextTrack => {
-                                    if let Some(token) = api_get_token(&spotify).await {
+                                    if let Some(token) = api_get_token(&spotify, &client_id, &cache_file).await {
                                         let client = reqwest::Client::new();
                                         let _ = send_player_cmd(&client, &token, reqwest::Method::POST, "next").await;
                                         tokio::time::sleep(Duration::from_millis(300)).await;
-                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count, &client_id, &cache_file).await;
                                     }
                                 }
                                 SpotifyCommand::PreviousTrack => {
-                                    if let Some(token) = api_get_token(&spotify).await {
+                                    if let Some(token) = api_get_token(&spotify, &client_id, &cache_file).await {
                                         let client = reqwest::Client::new();
                                         let _ = send_player_cmd(&client, &token, reqwest::Method::POST, "previous").await;
                                         tokio::time::sleep(Duration::from_millis(300)).await;
-                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count, &client_id, &cache_file).await;
                                     }
                                 }
                                 SpotifyCommand::Seek(pos_ms) => {
-                                    if let Some(token) = api_get_token(&spotify).await {
+                                    if let Some(token) = api_get_token(&spotify, &client_id, &cache_file).await {
                                         let client = reqwest::Client::new();
                                         let url = format!("https://api.spotify.com/v1/me/player/seek?position_ms={}", pos_ms);
                                         let _ = client.put(&url)
@@ -336,7 +360,7 @@ impl SpotifyManager {
                                             .send()
                                             .await;
                                         tokio::time::sleep(Duration::from_millis(200)).await;
-                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                                        poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count, &client_id, &cache_file).await;
                                     }
                                 }
                                 SpotifyCommand::FetchPlaylists => {
@@ -346,7 +370,7 @@ impl SpotifyManager {
                         }
 
                         _ = poll_interval.tick() => {
-                            poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count).await;
+                            poll_playback(&spotify, &event_sender, &mut last_art_url, &mut last_lyrics_track, &mut error_count, &client_id, &cache_file).await;
                         }
                     }
                 }
@@ -385,10 +409,97 @@ impl SpotifyManager {
     }
 }
 
-async fn api_get_token(spotify: &AuthCodePkceSpotify) -> Option<String> {
-    match spotify.get_token().lock().await {
-        Ok(guard) => guard.as_ref().map(|t| t.access_token.clone()),
-        Err(_) => None,
+async fn direct_refresh_token(
+    client_id: &str,
+    refresh_token: &str,
+    cache_path: &PathBuf,
+) -> Option<rspotify::model::Token> {
+    let client = reqwest::Client::new();
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    let resp = client
+        .post("https://accounts.spotify.com/api/token")
+        .form(&params)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let val = resp.json::<serde_json::Value>().await.ok()?;
+    let access_token = val["access_token"].as_str()?.to_string();
+    let expires_in_sec = val["expires_in"].as_u64().unwrap_or(3600);
+    let new_refresh = val["refresh_token"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| refresh_token.to_string());
+
+    let mut cache_json: serde_json::Value = std::fs::read_to_string(cache_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    cache_json["access_token"] = serde_json::Value::String(access_token);
+    cache_json["expires_in"] = serde_json::json!(expires_in_sec);
+    cache_json["refresh_token"] = serde_json::Value::String(new_refresh);
+    let now = chrono::Utc::now();
+    let exp_at = now + chrono::Duration::seconds(expires_in_sec as i64);
+    cache_json["expires_at"] = serde_json::json!(exp_at.to_rfc3339());
+
+    if let Ok(serialized) = serde_json::to_string_pretty(&cache_json) {
+        let _ = std::fs::write(cache_path, serialized);
+    }
+
+    serde_json::from_value(cache_json).ok()
+}
+
+async fn api_get_token(
+    spotify: &AuthCodePkceSpotify,
+    client_id: &str,
+    cache_path: &PathBuf,
+) -> Option<String> {
+    let mut needs_refresh = false;
+    let mut refresh_tok_str = None;
+    {
+        if let Ok(guard) = spotify.get_token().lock().await {
+            if let Some(ref t) = *guard {
+                if t.expires_at.map(|exp| exp <= chrono::Utc::now() + chrono::Duration::seconds(30)).unwrap_or(false) {
+                    needs_refresh = true;
+                    refresh_tok_str = t.refresh_token.clone();
+                } else {
+                    return Some(t.access_token.clone());
+                }
+            }
+        }
+    }
+
+    if needs_refresh {
+        if let Some(r_tok) = refresh_tok_str {
+            if let Some(new_tok) = direct_refresh_token(client_id, &r_tok, cache_path).await {
+                let access = new_tok.access_token.clone();
+                if let Ok(mut guard) = spotify.get_token().lock().await {
+                    *guard = Some(new_tok);
+                }
+                return Some(access);
+            }
+        }
+        if let Ok(()) = spotify.refresh_token().await {
+            let _ = spotify.write_token_cache().await;
+            if let Ok(guard) = spotify.get_token().lock().await {
+                return guard.as_ref().map(|t| t.access_token.clone());
+            }
+        }
+    }
+
+    if let Ok(guard) = spotify.get_token().lock().await {
+        guard.as_ref().map(|t| t.access_token.clone())
+    } else {
+        None
     }
 }
 
@@ -448,13 +559,10 @@ async fn poll_playback(
     last_art_url: &mut Option<String>,
     last_lyrics_track: &mut Option<String>,
     error_count: &mut u32,
+    client_id: &str,
+    cache_path: &PathBuf,
 ) {
-    let access_token = {
-        match spotify.get_token().lock().await {
-            Ok(guard) => guard.as_ref().map(|t| t.access_token.clone()),
-            Err(_) => None,
-        }
-    };
+    let access_token = api_get_token(spotify, client_id, cache_path).await;
 
     let token = match access_token {
         Some(t) => t,
@@ -481,11 +589,37 @@ async fn poll_playback(
             }
         }
         Ok(r) if r.status().as_u16() == 401 => {
-            *error_count += 1;
-            if *error_count >= 2 {
-                let _ = event_sender.send(SpotifyEvent::Disconnected(
-                    "🔄 Token expired — restart to re-auth".to_string(),
-                ));
+            // Token expired during runtime: perform silent background auto-refresh!
+            let r_tok = match spotify.get_token().lock().await {
+                Ok(guard) => guard.as_ref().and_then(|t| t.refresh_token.clone()),
+                Err(_) => None,
+            };
+            let mut refreshed = false;
+            if let Some(ref rt) = r_tok {
+                if let Some(new_tok) = direct_refresh_token(client_id, rt, cache_path).await {
+                    if let Ok(mut guard) = spotify.get_token().lock().await {
+                        *guard = Some(new_tok);
+                    }
+                    refreshed = true;
+                }
+            }
+            if !refreshed {
+                if let Ok(()) = spotify.refresh_token().await {
+                    let _ = spotify.write_token_cache().await;
+                    refreshed = true;
+                }
+            }
+
+            if refreshed {
+                *error_count = 0;
+                let _ = event_sender.send(SpotifyEvent::Connected("🟢 Connected".to_string()));
+            } else {
+                *error_count += 1;
+                if *error_count >= 3 {
+                    let _ = event_sender.send(SpotifyEvent::Disconnected(
+                        "🔄 Refreshing Spotify session…".to_string(),
+                    ));
+                }
             }
         }
         Ok(r) => {
@@ -716,7 +850,7 @@ async fn fetch_recent_or_idle_track(
     }
 }
 
-/// Fetch real synced lyrics from LRCLIB database (free, no token needed)
+/// Multi-source lyrics aggregator and real-time English translation engine
 async fn fetch_synced_lyrics(
     track_id: String,
     track_name: String,
@@ -739,75 +873,345 @@ async fn fetch_synced_lyrics(
 
     let duration_secs = (duration_ms / 1000).max(1);
 
-    // Attempt 1: Exact match with track_name, primary_artist, album_name, duration
-    let url1 = format!(
-        "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
-        urlencode(&clean_title),
-        urlencode(primary_artist),
-        urlencode(&album_name),
-        duration_secs
-    );
+    // 1. Exact match LRCLIB (track, primary_artist, album, duration)
+    let mut raw_lines = fetch_lrclib_exact(&client, &clean_title, primary_artist, &album_name, duration_secs, duration_ms).await;
 
-    let mut result_json: Option<serde_json::Value> = None;
-    if let Ok(resp) = client.get(&url1).send().await {
-        if resp.status().is_success() {
-            if let Ok(val) = resp.json::<serde_json::Value>().await {
-                if !val["syncedLyrics"].is_null() || !val["plainLyrics"].is_null() {
-                    result_json = Some(val);
-                }
-            }
-        }
+    // 2. Clean title + primary artist LRCLIB
+    if raw_lines.is_empty() {
+        raw_lines = fetch_lrclib_title_artist(&client, &clean_title, primary_artist, duration_ms).await;
     }
 
-    // Attempt 2: Match with clean track_name and primary artist only
-    if result_json.is_none() {
-        let url2 = format!(
-            "https://lrclib.net/api/get?track_name={}&artist_name={}",
-            urlencode(&clean_title),
-            urlencode(primary_artist),
-        );
-        if let Ok(resp) = client.get(&url2).send().await {
-            if resp.status().is_success() {
-                if let Ok(val) = resp.json::<serde_json::Value>().await {
-                    if !val["syncedLyrics"].is_null() || !val["plainLyrics"].is_null() {
-                        result_json = Some(val);
-                    }
-                }
-            }
-        }
+    // 3. Search query LRCLIB (clean title + primary artist)
+    if raw_lines.is_empty() {
+        raw_lines = fetch_lrclib_search(&client, &format!("{} {}", clean_title, primary_artist), duration_ms).await;
     }
 
-    // Attempt 3: Try full artist name if primary differed
-    if result_json.is_none() && primary_artist != artist_name {
-        let url3 = format!(
-            "https://lrclib.net/api/get?track_name={}&artist_name={}",
-            urlencode(&clean_title),
-            urlencode(&artist_name),
-        );
-        if let Ok(resp) = client.get(&url3).send().await {
-            if resp.status().is_success() {
-                if let Ok(val) = resp.json::<serde_json::Value>().await {
-                    if !val["syncedLyrics"].is_null() || !val["plainLyrics"].is_null() {
-                        result_json = Some(val);
-                    }
-                }
-            }
-        }
+    // 4. Search query LRCLIB with clean title only
+    if raw_lines.is_empty() {
+        raw_lines = fetch_lrclib_search(&client, &clean_title, duration_ms).await;
     }
 
-    let lyrics = if let Some(val) = result_json {
-        if let Some(synced) = val["syncedLyrics"].as_str() {
-            parse_lrc(synced)
-        } else if let Some(plain) = val["plainLyrics"].as_str() {
-            parse_plain_lyrics(plain, duration_ms)
-        } else {
-            vec![]
-        }
+    // 5. Lyrics.ovh API with primary artist and clean title
+    if raw_lines.is_empty() {
+        raw_lines = fetch_lyrics_ovh(&client, primary_artist, &clean_title, duration_ms).await;
+    }
+
+    // 6. Lyrics.ovh API with full artist name
+    if raw_lines.is_empty() && primary_artist != artist_name {
+        raw_lines = fetch_lyrics_ovh(&client, &artist_name, &clean_title, duration_ms).await;
+    }
+
+    // 7. If STILL no lyrics found anywhere, generate structured English musical/acoustic guide
+    if raw_lines.is_empty() {
+        raw_lines = generate_instrumental_guide(duration_ms, &clean_title, primary_artist);
+    }
+
+    // 8. Translation pipeline: if lyrics are in any non-English language, translate to English!
+    let final_lyrics = if !raw_lines.is_empty() && !is_lyrics_english(&raw_lines) {
+        translate_lyrics_to_english(&client, raw_lines).await
     } else {
-        vec![]
+        raw_lines
     };
 
-    let _ = event_sender.send(SpotifyEvent::LyricsLoaded { track_id, lyrics });
+    let _ = event_sender.send(SpotifyEvent::LyricsLoaded {
+        track_id,
+        lyrics: final_lyrics,
+    });
+}
+
+async fn fetch_lrclib_exact(
+    client: &reqwest::Client,
+    track: &str,
+    artist: &str,
+    album: &str,
+    duration_secs: u64,
+    duration_ms: u64,
+) -> Vec<LyricLine> {
+    let url = format!(
+        "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
+        urlencode(track),
+        urlencode(artist),
+        urlencode(album),
+        duration_secs
+    );
+    if let Ok(resp) = client.get(&url).send().await {
+        if resp.status().is_success() {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                if let Some(synced) = val["syncedLyrics"].as_str() {
+                    return parse_lrc(synced);
+                } else if let Some(plain) = val["plainLyrics"].as_str() {
+                    return parse_plain_lyrics(plain, duration_ms);
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+async fn fetch_lrclib_title_artist(
+    client: &reqwest::Client,
+    track: &str,
+    artist: &str,
+    duration_ms: u64,
+) -> Vec<LyricLine> {
+    let url = format!(
+        "https://lrclib.net/api/get?track_name={}&artist_name={}",
+        urlencode(track),
+        urlencode(artist),
+    );
+    if let Ok(resp) = client.get(&url).send().await {
+        if resp.status().is_success() {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                if let Some(synced) = val["syncedLyrics"].as_str() {
+                    return parse_lrc(synced);
+                } else if let Some(plain) = val["plainLyrics"].as_str() {
+                    return parse_plain_lyrics(plain, duration_ms);
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+async fn fetch_lrclib_search(
+    client: &reqwest::Client,
+    query: &str,
+    duration_ms: u64,
+) -> Vec<LyricLine> {
+    let url = format!("https://lrclib.net/api/search?q={}", urlencode(query));
+    if let Ok(resp) = client.get(&url).send().await {
+        if resp.status().is_success() {
+            if let Ok(items) = resp.json::<Vec<serde_json::Value>>().await {
+                for it in items {
+                    if let Some(synced) = it["syncedLyrics"].as_str() {
+                        let lines = parse_lrc(synced);
+                        if !lines.is_empty() {
+                            return lines;
+                        }
+                    } else if let Some(plain) = it["plainLyrics"].as_str() {
+                        let lines = parse_plain_lyrics(plain, duration_ms);
+                        if !lines.is_empty() {
+                            return lines;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+async fn fetch_lyrics_ovh(
+    client: &reqwest::Client,
+    artist: &str,
+    title: &str,
+    duration_ms: u64,
+) -> Vec<LyricLine> {
+    let url = format!(
+        "https://api.lyrics.ovh/v1/{}/{}",
+        urlencode(artist),
+        urlencode(title)
+    );
+    if let Ok(resp) = client.get(&url).send().await {
+        if resp.status().is_success() {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                if let Some(lyrics_str) = val["lyrics"].as_str() {
+                    let lines = parse_plain_lyrics(lyrics_str, duration_ms);
+                    if !lines.is_empty() {
+                        return lines;
+                    }
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+fn generate_instrumental_guide(duration_ms: u64, track_name: &str, artist_name: &str) -> Vec<LyricLine> {
+    let dur = if duration_ms == 0 { 180_000 } else { duration_ms };
+    let step = dur / 6;
+
+    vec![
+        LyricLine {
+            time_ms: 1_000,
+            text: format!("♫ [Musical Intro — {} by {}] ♫", track_name, artist_name),
+        },
+        LyricLine {
+            time_ms: step.max(8_000),
+            text: "♫ [Melodic Theme & Atmospheric Rhythm] ♫".to_string(),
+        },
+        LyricLine {
+            time_ms: (step * 2).min(dur.saturating_sub(40_000)),
+            text: "♫ [Harmonic Progression / Verse Dynamic] ♫".to_string(),
+        },
+        LyricLine {
+            time_ms: (step * 3).min(dur.saturating_sub(30_000)),
+            text: "♫ [Musical Climax / Main Theme] ♫".to_string(),
+        },
+        LyricLine {
+            time_ms: (step * 4).min(dur.saturating_sub(20_000)),
+            text: "♫ [Instrumental Solo & Dynamic Breakdown] ♫".to_string(),
+        },
+        LyricLine {
+            time_ms: (step * 5).min(dur.saturating_sub(10_000)),
+            text: "♫ [Outro / Smooth Deceleration & Fade] ♫".to_string(),
+        },
+    ]
+}
+
+fn is_lyrics_english(lines: &[LyricLine]) -> bool {
+    let mut non_latin_count = 0;
+    let mut total_words = 0;
+    let mut eng_word_count = 0;
+    let mut hinglish_count = 0;
+
+    let hinglish_markers = [
+        "mera", "meri", "tere", "teri", "hum", "tum", "hai", "nahi", "kya", "dil", "pyar",
+        "ishq", "zindagi", "saath", "guzara", "chahat", "deewana", "jaana", "aankhein",
+        "khuda", "dua", "mohabbat", "sanam", "kabhi", "hoga", "raha", "rahi", "hote",
+        "kaun", "kuch", "sab", "apna", "apni", "badal", "kare", "karna", "baat", "yaad",
+    ];
+
+    let english_words = [
+        "the", "you", "and", "to", "in", "that", "it", "is", "was", "for", "on", "are",
+        "with", "my", "me", "we", "your", "love", "baby", "all", "can", "so", "just",
+        "be", "this", "have", "from", "but", "not", "what", "like", "see", "go", "know",
+        "get", "time", "feel", "night", "now", "down", "day", "way", "say", "girl", "boy",
+    ];
+
+    for line in lines {
+        for c in line.text.chars() {
+            let u = c as u32;
+            if (0x0400..=0x04FF).contains(&u)
+                || (0x0600..=0x06FF).contains(&u)
+                || (0x0900..=0x097F).contains(&u)
+                || (0x3040..=0x30FF).contains(&u)
+                || (0x4E00..=0x9FFF).contains(&u)
+                || (0xAC00..=0xD7AF).contains(&u)
+                || (0x0E00..=0x0E7F).contains(&u)
+            {
+                non_latin_count += 1;
+            }
+        }
+
+        for word in line.text.split_whitespace() {
+            let clean = word.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
+            if clean.is_empty() {
+                continue;
+            }
+            total_words += 1;
+            if hinglish_markers.contains(&clean.as_str()) {
+                hinglish_count += 1;
+            }
+            if english_words.contains(&clean.as_str()) {
+                eng_word_count += 1;
+            }
+        }
+    }
+
+    if non_latin_count >= 2 {
+        return false;
+    }
+    if hinglish_count >= 2 {
+        return false;
+    }
+    if total_words > 0 && (eng_word_count as f32 / total_words as f32) >= 0.12 {
+        return true;
+    }
+    false
+}
+
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+async fn translate_lyrics_to_english(client: &reqwest::Client, mut lines: Vec<LyricLine>) -> Vec<LyricLine> {
+    if lines.is_empty() {
+        return lines;
+    }
+
+    let mut hinglish_score = 0;
+    let hinglish_markers = [
+        "mera", "meri", "tere", "teri", "hum", "tum", "hai", "nahi", "kya", "dil", "pyar",
+        "ishq", "zindagi", "saath", "guzara", "chahat", "deewana", "jaana", "khuda", "dua",
+    ];
+    for line in &lines {
+        for word in line.text.split_whitespace() {
+            let clean = word.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
+            if hinglish_markers.contains(&clean.as_str()) {
+                hinglish_score += 1;
+            }
+        }
+    }
+    let langpair = if hinglish_score >= 2 { "hi|en" } else { "autodetect|en" };
+
+    // Batch lines into chunks of max 6 lines or ~350 chars
+    let mut chunk_indices: Vec<Vec<usize>> = Vec::new();
+    let mut current_chunk: Vec<usize> = Vec::new();
+    let mut current_chars = 0;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if !current_chunk.is_empty() && (current_chunk.len() >= 6 || current_chars + line.text.len() > 350) {
+            chunk_indices.push(current_chunk);
+            current_chunk = Vec::new();
+            current_chars = 0;
+        }
+        current_chars += line.text.len() + 1;
+        current_chunk.push(idx);
+    }
+    if !current_chunk.is_empty() {
+        chunk_indices.push(current_chunk);
+    }
+
+    let mut handles = Vec::new();
+    for (chunk_idx, chunk) in chunk_indices.into_iter().enumerate() {
+        let client_c = client.clone();
+        let texts: Vec<String> = chunk.iter().map(|&i| lines[i].text.clone()).collect();
+        let lp = langpair.to_string();
+        handles.push(tokio::spawn(async move {
+            let payload = texts.join("\n");
+            let url = format!(
+                "https://api.mymemory.translated.net/get?q={}&langpair={}",
+                urlencode(&payload),
+                lp
+            );
+            if let Ok(resp) = client_c.get(&url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(val) = resp.json::<serde_json::Value>().await {
+                        if let Some(trans_str) = val["responseData"]["translatedText"].as_str() {
+                            let translated: Vec<String> = trans_str
+                                .lines()
+                                .map(|s| decode_html_entities(s.trim()))
+                                .collect();
+                            if translated.len() == texts.len() {
+                                return (chunk_idx, chunk, Some(translated));
+                            }
+                        }
+                    }
+                }
+            }
+            (chunk_idx, chunk, None)
+        }));
+    }
+
+    let results = futures::future::join_all(handles).await;
+    for res in results {
+        if let Ok((_c_idx, chunk, Some(trans_lines))) = res {
+            for (i, &line_idx) in chunk.iter().enumerate() {
+                let t = &trans_lines[i];
+                if !t.is_empty() && !t.starts_with("MYMEMORY WARNING:") {
+                    lines[line_idx].text = t.clone();
+                }
+            }
+        }
+    }
+
+    lines
 }
 
 fn clean_track_title(title: &str) -> String {
