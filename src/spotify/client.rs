@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::spotify::transliterate::{is_pure_latin, romanize_lyrics};
 use crate::ui::lyrics::LyricLine;
 
 #[allow(dead_code)]
@@ -906,12 +907,12 @@ async fn fetch_synced_lyrics(
         raw_lines = generate_instrumental_guide(duration_ms, &clean_title, primary_artist);
     }
 
-    // 8. Translation pipeline: if lyrics are in any non-English language, translate to English!
-    let final_lyrics = if !raw_lines.is_empty() && !is_lyrics_english(&raw_lines) {
-        translate_lyrics_to_english(&client, raw_lines).await
-    } else {
-        raw_lines
-    };
+    // 8. Transliteration pipeline: Romanize non-English lyrics phonetically into English/Latin letters
+    // (e.g. Devanagari "मेरी" -> "meri", "तुम ही हो" -> "tum hi ho", "हम तेरे बिन" -> "hum tere bin",
+    // Gurmukhi "ਮੇਰੀ" -> "meri", Korean Hangul "사랑해요" -> "saranghaeyo",
+    // Japanese Kana "ありがとう" -> "arigatou", Cyrillic "Привет" -> "Privet").
+    // Preserves original words phonetically for singing along; does NOT alter meaning or touch Latin text.
+    let final_lyrics = romanize_lyrics(raw_lines);
 
     let _ = event_sender.send(SpotifyEvent::LyricsLoaded {
         track_id,
@@ -982,13 +983,27 @@ async fn fetch_lrclib_search(
     if let Ok(resp) = client.get(&url).send().await {
         if resp.status().is_success() {
             if let Ok(items) = resp.json::<Vec<serde_json::Value>>().await {
-                for it in items {
+                // Pass 1: Prioritize synced community lyrics that are already in Latin script (e.g. Hinglish / Romaji)
+                for it in &items {
+                    if let Some(synced) = it["syncedLyrics"].as_str() {
+                        let lines = parse_lrc(synced);
+                        if !lines.is_empty() && is_pure_latin(&lines) {
+                            return lines;
+                        }
+                    }
+                }
+                // Pass 2: Any synced lyrics
+                for it in &items {
                     if let Some(synced) = it["syncedLyrics"].as_str() {
                         let lines = parse_lrc(synced);
                         if !lines.is_empty() {
                             return lines;
                         }
-                    } else if let Some(plain) = it["plainLyrics"].as_str() {
+                    }
+                }
+                // Pass 3: Plain lyrics
+                for it in &items {
+                    if let Some(plain) = it["plainLyrics"].as_str() {
                         let lines = parse_plain_lyrics(plain, duration_ms);
                         if !lines.is_empty() {
                             return lines;
@@ -1057,161 +1072,6 @@ fn generate_instrumental_guide(duration_ms: u64, track_name: &str, artist_name: 
             text: "♫ [Outro / Smooth Deceleration & Fade] ♫".to_string(),
         },
     ]
-}
-
-fn is_lyrics_english(lines: &[LyricLine]) -> bool {
-    let mut non_latin_count = 0;
-    let mut total_words = 0;
-    let mut eng_word_count = 0;
-    let mut hinglish_count = 0;
-
-    let hinglish_markers = [
-        "mera", "meri", "tere", "teri", "hum", "tum", "hai", "nahi", "kya", "dil", "pyar",
-        "ishq", "zindagi", "saath", "guzara", "chahat", "deewana", "jaana", "aankhein",
-        "khuda", "dua", "mohabbat", "sanam", "kabhi", "hoga", "raha", "rahi", "hote",
-        "kaun", "kuch", "sab", "apna", "apni", "badal", "kare", "karna", "baat", "yaad",
-    ];
-
-    let english_words = [
-        "the", "you", "and", "to", "in", "that", "it", "is", "was", "for", "on", "are",
-        "with", "my", "me", "we", "your", "love", "baby", "all", "can", "so", "just",
-        "be", "this", "have", "from", "but", "not", "what", "like", "see", "go", "know",
-        "get", "time", "feel", "night", "now", "down", "day", "way", "say", "girl", "boy",
-    ];
-
-    for line in lines {
-        for c in line.text.chars() {
-            let u = c as u32;
-            if (0x0400..=0x04FF).contains(&u)
-                || (0x0600..=0x06FF).contains(&u)
-                || (0x0900..=0x097F).contains(&u)
-                || (0x3040..=0x30FF).contains(&u)
-                || (0x4E00..=0x9FFF).contains(&u)
-                || (0xAC00..=0xD7AF).contains(&u)
-                || (0x0E00..=0x0E7F).contains(&u)
-            {
-                non_latin_count += 1;
-            }
-        }
-
-        for word in line.text.split_whitespace() {
-            let clean = word.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
-            if clean.is_empty() {
-                continue;
-            }
-            total_words += 1;
-            if hinglish_markers.contains(&clean.as_str()) {
-                hinglish_count += 1;
-            }
-            if english_words.contains(&clean.as_str()) {
-                eng_word_count += 1;
-            }
-        }
-    }
-
-    if non_latin_count >= 2 {
-        return false;
-    }
-    if hinglish_count >= 2 {
-        return false;
-    }
-    if total_words > 0 && (eng_word_count as f32 / total_words as f32) >= 0.12 {
-        return true;
-    }
-    false
-}
-
-fn decode_html_entities(s: &str) -> String {
-    s.replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-}
-
-async fn translate_lyrics_to_english(client: &reqwest::Client, mut lines: Vec<LyricLine>) -> Vec<LyricLine> {
-    if lines.is_empty() {
-        return lines;
-    }
-
-    let mut hinglish_score = 0;
-    let hinglish_markers = [
-        "mera", "meri", "tere", "teri", "hum", "tum", "hai", "nahi", "kya", "dil", "pyar",
-        "ishq", "zindagi", "saath", "guzara", "chahat", "deewana", "jaana", "khuda", "dua",
-    ];
-    for line in &lines {
-        for word in line.text.split_whitespace() {
-            let clean = word.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
-            if hinglish_markers.contains(&clean.as_str()) {
-                hinglish_score += 1;
-            }
-        }
-    }
-    let langpair = if hinglish_score >= 2 { "hi|en" } else { "autodetect|en" };
-
-    // Batch lines into chunks of max 6 lines or ~350 chars
-    let mut chunk_indices: Vec<Vec<usize>> = Vec::new();
-    let mut current_chunk: Vec<usize> = Vec::new();
-    let mut current_chars = 0;
-
-    for (idx, line) in lines.iter().enumerate() {
-        if !current_chunk.is_empty() && (current_chunk.len() >= 6 || current_chars + line.text.len() > 350) {
-            chunk_indices.push(current_chunk);
-            current_chunk = Vec::new();
-            current_chars = 0;
-        }
-        current_chars += line.text.len() + 1;
-        current_chunk.push(idx);
-    }
-    if !current_chunk.is_empty() {
-        chunk_indices.push(current_chunk);
-    }
-
-    let mut handles = Vec::new();
-    for (chunk_idx, chunk) in chunk_indices.into_iter().enumerate() {
-        let client_c = client.clone();
-        let texts: Vec<String> = chunk.iter().map(|&i| lines[i].text.clone()).collect();
-        let lp = langpair.to_string();
-        handles.push(tokio::spawn(async move {
-            let payload = texts.join("\n");
-            let url = format!(
-                "https://api.mymemory.translated.net/get?q={}&langpair={}",
-                urlencode(&payload),
-                lp
-            );
-            if let Ok(resp) = client_c.get(&url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(val) = resp.json::<serde_json::Value>().await {
-                        if let Some(trans_str) = val["responseData"]["translatedText"].as_str() {
-                            let translated: Vec<String> = trans_str
-                                .lines()
-                                .map(|s| decode_html_entities(s.trim()))
-                                .collect();
-                            if translated.len() == texts.len() {
-                                return (chunk_idx, chunk, Some(translated));
-                            }
-                        }
-                    }
-                }
-            }
-            (chunk_idx, chunk, None)
-        }));
-    }
-
-    let results = futures::future::join_all(handles).await;
-    for res in results {
-        if let Ok((_c_idx, chunk, Some(trans_lines))) = res {
-            for (i, &line_idx) in chunk.iter().enumerate() {
-                let t = &trans_lines[i];
-                if !t.is_empty() && !t.starts_with("MYMEMORY WARNING:") {
-                    lines[line_idx].text = t.clone();
-                }
-            }
-        }
-    }
-
-    lines
 }
 
 fn clean_track_title(title: &str) -> String {
